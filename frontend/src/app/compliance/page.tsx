@@ -18,8 +18,24 @@ export default function CompliancePage() {
 
   async function handleVerifyCompliance() {
     if (!address) return;
+    if (!COMPLIANCE_CONTRACT_ID) {
+      setStatus("Error: Compliance contract ID not configured.");
+      return;
+    }
     if (!proofHex || !publicInputsHex) {
       setStatus("Error: Paste the compliance proof and public inputs.");
+      return;
+    }
+
+    const cleanPublicInputs = publicInputsHex.replace(/^0x/, "").trim();
+    const cleanProof = proofHex.replace(/^0x/, "").trim();
+
+    if (!/^[0-9a-fA-F]+$/.test(cleanPublicInputs)) {
+      setStatus("Error: Public inputs must be valid hex.");
+      return;
+    }
+    if (!/^[0-9a-fA-F]+$/.test(cleanProof)) {
+      setStatus("Error: Proof must be valid hex.");
       return;
     }
 
@@ -28,10 +44,10 @@ export default function CompliancePage() {
 
     try {
       const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(publicInputsHex.replace(/^0x/, ""), "hex"),
+        Buffer.from(cleanPublicInputs, "hex"),
       );
       const proofScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(proofHex.replace(/^0x/, ""), "hex"),
+        Buffer.from(cleanProof, "hex"),
       );
 
       const tx = await buildContractCall(
@@ -41,7 +57,7 @@ export default function CompliancePage() {
         address,
       );
 
-      setStatus("Waiting for wallet signature...");
+      setStatus("Signing transaction...");
       const signedXdr = await signTransaction(tx.toXDR());
 
       setStatus("Submitting transaction...");
@@ -51,7 +67,16 @@ export default function CompliancePage() {
       setProofHex("");
       setPublicInputsHex("");
     } catch (err) {
-      setStatus(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      let errorMessage = "Unknown error";
+      if (err instanceof Error) {
+        errorMessage = err.message;
+      } else if (typeof err === "string") {
+        errorMessage = err;
+      } else if (err && typeof err === "object") {
+        errorMessage = JSON.stringify(err);
+      }
+      console.error("Compliance error:", err);
+      setStatus(`Error: ${errorMessage}`);
     } finally {
       setIsLoading(false);
     }
@@ -62,7 +87,9 @@ export default function CompliancePage() {
       <div className="mx-auto max-w-2xl px-6 py-16">
         <h1 className="text-2xl font-bold">Compliance</h1>
         <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
-          <p className="text-zinc-400">Connect your wallet to verify compliance.</p>
+          <p className="text-zinc-400">
+            Connect your wallet to verify compliance.
+          </p>
         </div>
       </div>
     );
@@ -77,7 +104,6 @@ export default function CompliancePage() {
       </p>
 
       <div className="mt-8 space-y-6">
-        {/* Explanation */}
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
           <h3 className="text-sm font-medium text-zinc-400">How it works</h3>
           <ol className="mt-3 space-y-2 text-sm text-zinc-500">
@@ -88,12 +114,10 @@ export default function CompliancePage() {
               </code>
             </li>
             <li>
-              2. The proof shows your KYC hash is registered, your note exists
-              in the Merkle tree, and reveals only the disclosed amount
+              2. The proof shows your KYC hash is registered, your note exists in
+              the Merkle tree, and reveals only the disclosed amount
             </li>
-            <li>
-              3. Submit the proof on-chain for verification
-            </li>
+            <li>3. Submit the proof on-chain for verification</li>
             <li>
               4. The auditor sees the disclosed amount and your KYC status, but
               not your identity or other transactions
@@ -101,7 +125,6 @@ export default function CompliancePage() {
           </ol>
         </div>
 
-        {/* Public Inputs */}
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
           <h3 className="mb-3 text-sm font-medium text-zinc-400">
             Compliance Proof Data
@@ -140,7 +163,12 @@ export default function CompliancePage() {
 
         <button
           onClick={handleVerifyCompliance}
-          disabled={isLoading || !proofHex || !publicInputsHex || !COMPLIANCE_CONTRACT_ID}
+          disabled={
+            isLoading ||
+            !proofHex ||
+            !publicInputsHex ||
+            !COMPLIANCE_CONTRACT_ID
+          }
           className="w-full rounded-lg bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isLoading ? "Verifying..." : "Submit Compliance Proof"}

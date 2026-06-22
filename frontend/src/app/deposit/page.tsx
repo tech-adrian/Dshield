@@ -6,8 +6,11 @@ import {
   buildContractCall,
   submitTransaction,
   POOL_CONTRACT_ID,
+  queryContract,
 } from "@/lib/stellar";
 import { saveNote, generateRandomField } from "@/lib/notes";
+import { saveDeposit } from "@/lib/deposits";
+import { computeCommitment } from "@/lib/poseidon2";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 export default function DepositPage() {
@@ -18,25 +21,34 @@ export default function DepositPage() {
 
   async function handleDeposit() {
     if (!address) return;
+    if (!POOL_CONTRACT_ID) {
+      setStatus("Error: Pool contract ID not configured.");
+      return;
+    }
+
     setIsLoading(true);
-    setStatus("Generating commitment...");
+    setStatus("Generating nullifier and secret...");
 
     try {
       const nullifier = generateRandomField();
       const secret = generateRandomField();
 
-      // For the MVP we send the commitment as a pre-computed hash.
-      // In production, this would be computed via Poseidon2 WASM.
-      // For now, we generate a random commitment to demonstrate the flow.
-      const commitmentBytes = new Uint8Array(32);
-      crypto.getRandomValues(commitmentBytes);
-      const commitment = Array.from(commitmentBytes)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
+      setStatus("Computing Poseidon2 commitment...");
+      const commitment = await computeCommitment(nullifier, secret);
+      const commitmentClean = commitment.replace(/^0x/, "");
+
+      setStatus("Querying current tree index...");
+      const nextIndexVal = await queryContract(
+        POOL_CONTRACT_ID,
+        "get_next_index",
+      );
+      const leafIndex = nextIndexVal
+        ? Number(StellarSdk.scValToNative(nextIndexVal))
+        : 0;
 
       setStatus("Building transaction...");
       const commitmentScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(commitment, "hex"),
+        Buffer.from(commitmentClean, "hex"),
       );
 
       const tx = await buildContractCall(
@@ -46,7 +58,7 @@ export default function DepositPage() {
         address,
       );
 
-      setStatus("Waiting for wallet signature...");
+      setStatus("Signing transaction...");
       const signedXdr = await signTransaction(tx.toXDR());
 
       setStatus("Submitting transaction...");
@@ -55,16 +67,31 @@ export default function DepositPage() {
       saveNote({
         nullifier,
         secret,
-        commitment,
-        leafIndex: 0,
+        commitment: commitmentClean,
+        leafIndex,
         spent: false,
         createdAt: Date.now(),
       });
 
-      setLastCommitment(commitment);
+      saveDeposit({
+        commitment: commitmentClean,
+        leafIndex,
+        timestamp: Date.now(),
+      });
+
+      setLastCommitment(commitmentClean);
       setStatus(`Deposit successful! TX: ${txHash.slice(0, 12)}...`);
     } catch (err) {
-      setStatus(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      let errorMessage = "Unknown error";
+      if (err instanceof Error) {
+        errorMessage = err.message;
+      } else if (typeof err === "string") {
+        errorMessage = err;
+      } else if (err && typeof err === "object") {
+        errorMessage = JSON.stringify(err);
+      }
+      console.error("Deposit error:", err);
+      setStatus(`Error: ${errorMessage}`);
     } finally {
       setIsLoading(false);
     }
@@ -131,7 +158,7 @@ export default function DepositPage() {
 
         {lastCommitment && (
           <div className="mt-4 rounded-lg bg-zinc-800 p-3">
-            <p className="text-xs text-zinc-500">Commitment</p>
+            <p className="text-xs text-zinc-500">Commitment (Poseidon2 hash)</p>
             <p className="mt-1 break-all font-mono text-xs text-zinc-300">
               {lastCommitment}
             </p>
