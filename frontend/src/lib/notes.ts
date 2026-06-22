@@ -3,6 +3,7 @@ export interface ShieldedNote {
   secret: string;
   commitment: string;
   leafIndex: number;
+  amount: string;
   spent: boolean;
   createdAt: number;
 }
