@@ -18,6 +18,7 @@ export default function DepositPage() {
   const [status, setStatus] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
   const [lastCommitment, setLastCommitment] = useState<string>("");
+  const [amount, setAmount] = useState<string>("1000000");
 
   async function handleDeposit() {
     if (!address) return;
@@ -69,6 +70,7 @@ export default function DepositPage() {
         secret,
         commitment: commitmentClean,
         leafIndex,
+        amount,
         spent: false,
         createdAt: Date.now(),
       });
@@ -127,9 +129,25 @@ export default function DepositPage() {
           </ol>
         </div>
 
+        <div className="mb-4">
+          <label className="mb-1 block text-xs text-zinc-500">
+            Amount (stroops)
+          </label>
+          <input
+            type="text"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value.trim())}
+            placeholder="1000000"
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-800 p-3 font-mono text-sm text-zinc-300 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
+          />
+          <p className="mt-1 text-xs text-zinc-600">
+            This amount is stored privately in your note for compliance proofs.
+          </p>
+        </div>
+
         <button
           onClick={handleDeposit}
-          disabled={isLoading || !POOL_CONTRACT_ID}
+          disabled={isLoading || !POOL_CONTRACT_ID || !amount}
           className="w-full rounded-lg bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isLoading ? "Processing..." : "Shield Funds"}
