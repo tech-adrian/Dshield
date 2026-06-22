@@ -3,16 +3,30 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || "http://localhost:8000/soroban/rpc";
 const NETWORK_PASSPHRASE =
   process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || "Standalone Network ; February 2017";
+const DEV_SECRET_KEY = process.env.NEXT_PUBLIC_DEV_SECRET_KEY || "";
 
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID || "";
 export const COMPLIANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID || "";
 
 export function getRpcServer() {
-  return new StellarSdk.rpc.Server(RPC_URL);
+  return new StellarSdk.rpc.Server(RPC_URL, { allowHttp: true });
 }
 
 export function getNetworkPassphrase() {
   return NETWORK_PASSPHRASE;
+}
+
+export function getDevKeypair(): StellarSdk.Keypair | null {
+  if (!DEV_SECRET_KEY) return null;
+  return StellarSdk.Keypair.fromSecret(DEV_SECRET_KEY);
+}
+
+export function devSignTransaction(xdr: string): string {
+  const keypair = getDevKeypair();
+  if (!keypair) throw new Error("No dev secret key configured");
+  const tx = StellarSdk.TransactionBuilder.fromXDR(xdr, NETWORK_PASSPHRASE);
+  tx.sign(keypair);
+  return tx.toXDR();
 }
 
 export async function buildContractCall(
@@ -76,7 +90,7 @@ export async function queryContract(
   const contract = new StellarSdk.Contract(contractId);
 
   const account = new StellarSdk.Account(
-    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHG",
+    "GA5WUJ54Z23KILLCUOUNAKTPBVZWKMQVO4O6EQ5GHLAERIMLLHNCSKYH",
     "0",
   );
 

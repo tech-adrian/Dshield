@@ -9,10 +9,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import {
-  StellarWalletsKit,
-  Networks,
-} from "@creit.tech/stellar-wallets-kit";
+import { StellarWalletsKit, Networks } from "@creit.tech/stellar-wallets-kit";
+import { getNetworkPassphrase, getDevKeypair, devSignTransaction } from "@/lib/stellar";
 import { FreighterModule } from "@creit.tech/stellar-wallets-kit/modules/freighter";
 import { xBullModule } from "@creit.tech/stellar-wallets-kit/modules/xbull";
 import { LobstrModule } from "@creit.tech/stellar-wallets-kit/modules/lobstr";
@@ -67,9 +65,16 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const connect = useCallback(async () => {
     setIsConnecting(true);
     try {
-      const { address: addr } = await StellarWalletsKit.authModal();
-      setAddress(addr);
-      localStorage.setItem("dshield_wallet", addr);
+      const devKeypair = getDevKeypair();
+      if (devKeypair) {
+        const addr = devKeypair.publicKey();
+        setAddress(addr);
+        localStorage.setItem("dshield_wallet", addr);
+      } else {
+        const { address: addr } = await StellarWalletsKit.authModal();
+        setAddress(addr);
+        localStorage.setItem("dshield_wallet", addr);
+      }
     } catch {
       // user closed modal
     } finally {
@@ -89,7 +94,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const signTransaction = useCallback(
     async (xdr: string): Promise<string> => {
-      const { signedTxXdr } = await StellarWalletsKit.signTransaction(xdr);
+      if (getDevKeypair()) {
+        return devSignTransaction(xdr);
+      }
+      const { signedTxXdr } = await StellarWalletsKit.signTransaction(xdr, {
+        networkPassphrase: getNetworkPassphrase(),
+      });
       return signedTxXdr;
     },
     [],
