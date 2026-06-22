@@ -1,0 +1,105 @@
+"use client";
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  StellarWalletsKit,
+  Networks,
+} from "@creit.tech/stellar-wallets-kit";
+import { FreighterModule } from "@creit.tech/stellar-wallets-kit/modules/freighter";
+import { xBullModule } from "@creit.tech/stellar-wallets-kit/modules/xbull";
+import { LobstrModule } from "@creit.tech/stellar-wallets-kit/modules/lobstr";
+import { HanaModule } from "@creit.tech/stellar-wallets-kit/modules/hana";
+import { AlbedoModule } from "@creit.tech/stellar-wallets-kit/modules/albedo";
+
+interface WalletContextType {
+  address: string | null;
+  connect: () => Promise<void>;
+  disconnect: () => void;
+  signTransaction: (xdr: string) => Promise<string>;
+  isConnecting: boolean;
+}
+
+const WalletContext = createContext<WalletContextType>({
+  address: null,
+  connect: async () => {},
+  disconnect: () => {},
+  signTransaction: async () => "",
+  isConnecting: false,
+});
+
+export function useWallet() {
+  return useContext(WalletContext);
+}
+
+export function WalletProvider({ children }: { children: ReactNode }) {
+  const [address, setAddress] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const initialized = useRef(false);
+
+  useEffect(() => {
+    if (initialized.current) return;
+    initialized.current = true;
+
+    StellarWalletsKit.init({
+      network: Networks.STANDALONE,
+      selectedWalletId: "freighter",
+      modules: [
+        new FreighterModule(),
+        new xBullModule(),
+        new LobstrModule(),
+        new HanaModule(),
+        new AlbedoModule(),
+      ],
+    });
+
+    const saved = localStorage.getItem("dshield_wallet");
+    if (saved) setAddress(saved);
+  }, []);
+
+  const connect = useCallback(async () => {
+    setIsConnecting(true);
+    try {
+      const { address: addr } = await StellarWalletsKit.authModal();
+      setAddress(addr);
+      localStorage.setItem("dshield_wallet", addr);
+    } catch {
+      // user closed modal
+    } finally {
+      setIsConnecting(false);
+    }
+  }, []);
+
+  const disconnect = useCallback(async () => {
+    try {
+      await StellarWalletsKit.disconnect();
+    } catch {
+      // ignore
+    }
+    setAddress(null);
+    localStorage.removeItem("dshield_wallet");
+  }, []);
+
+  const signTransaction = useCallback(
+    async (xdr: string): Promise<string> => {
+      const { signedTxXdr } = await StellarWalletsKit.signTransaction(xdr);
+      return signedTxXdr;
+    },
+    [],
+  );
+
+  return (
+    <WalletContext.Provider
+      value={{ address, connect, disconnect, signTransaction, isConnecting }}
+    >
+      {children}
+    </WalletContext.Provider>
+  );
+}
