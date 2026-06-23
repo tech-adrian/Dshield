@@ -3,6 +3,7 @@ import {
   saveDeposit,
   getDeposits,
   getAllCommitments,
+  clearDeposits,
   type DepositRecord,
 } from "./deposits";
 
@@ -74,5 +75,47 @@ describe("getAllCommitments", () => {
     expect(commitments[0]).toBe("first");
     expect(commitments[1]).toBe(zeroPadding);
     expect(commitments[2]).toBe("third");
+  });
+
+  it("scopes strictly to the requested pool", () => {
+    saveDeposit(makeDeposit({ commitment: "pa", leafIndex: 0, poolId: "POOL_A" }));
+    saveDeposit(makeDeposit({ commitment: "pb", leafIndex: 0, poolId: "POOL_B" }));
+    expect(getAllCommitments("POOL_A")).toEqual(["pa"]);
+    expect(getAllCommitments("POOL_B")).toEqual(["pb"]);
+  });
+
+  it("excludes legacy records without a poolId when a pool is requested", () => {
+    // A stale record from a previous deployment must not leak into the tree.
+    saveDeposit(makeDeposit({ commitment: "legacy", leafIndex: 0 }));
+    saveDeposit(makeDeposit({ commitment: "current", leafIndex: 1, poolId: "POOL_A" }));
+    const commitments = getAllCommitments("POOL_A");
+    const zeroPadding = "0x" + "00".repeat(32);
+    expect(commitments).toEqual([zeroPadding, "current"]);
+  });
+});
+
+describe("clearDeposits", () => {
+  it("clears the entire cache when no pool is given", () => {
+    saveDeposit(makeDeposit({ commitment: "a", leafIndex: 0, poolId: "POOL_A" }));
+    saveDeposit(makeDeposit({ commitment: "b", leafIndex: 1, poolId: "POOL_B" }));
+    const removed = clearDeposits();
+    expect(removed).toBe(2);
+    expect(getDeposits()).toEqual([]);
+  });
+
+  it("clears only the requested pool's records", () => {
+    saveDeposit(makeDeposit({ commitment: "a", leafIndex: 0, poolId: "POOL_A" }));
+    saveDeposit(makeDeposit({ commitment: "b", leafIndex: 1, poolId: "POOL_B" }));
+    const removed = clearDeposits("POOL_A");
+    expect(removed).toBe(1);
+    const remaining = getDeposits();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].poolId).toBe("POOL_B");
+  });
+
+  it("returns 0 when nothing matches", () => {
+    saveDeposit(makeDeposit({ commitment: "a", leafIndex: 0, poolId: "POOL_A" }));
+    expect(clearDeposits("POOL_X")).toBe(0);
+    expect(getDeposits()).toHaveLength(1);
   });
 });
