@@ -4,8 +4,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use soroban_poseidon::{poseidon2_hash, Field};
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, crypto::BnScalar, symbol_short, token,
-    Address, Bytes, BytesN, Env, IntoVal, InvokeError, Symbol, Val, Vec as SorobanVec, U256,
+    address_payload::AddressPayload, contract, contracterror, contractevent, contractimpl,
+    crypto::BnScalar, symbol_short, token, Address, Bytes, BytesN, Env, IntoVal, InvokeError,
+    Symbol, Val, Vec as SorobanVec, U256,
 };
 use ultrahonk_soroban_verifier::PROOF_BYTES;
 
@@ -26,6 +27,8 @@ pub enum PoolError {
     AlreadyInitialized = 8,
     InvalidPublicInputs = 9,
     TokenNotSet = 10,
+    RecipientMismatch = 11,
+    UnsupportedRecipient = 12,
 }
 
 #[contractevent(topics = ["deposit"], data_format = "map")]
@@ -70,6 +73,9 @@ fn key_root_history_prefix() -> Symbol {
 fn key_root_history_index() -> Symbol {
     symbol_short!("rhi")
 }
+fn key_commitment_by_index_prefix() -> Symbol {
+    symbol_short!("cmi")
+}
 
 const TREE_DEPTH: u32 = 20;
 const MAX_LEAVES: u32 = 1u32 << TREE_DEPTH;
@@ -87,6 +93,33 @@ fn poseidon2_hash2(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
     let mut out_arr = [0u8; 32];
     out_bytes.copy_into_slice(&mut out_arr);
     BytesN::from_array(env, &out_arr)
+}
+
+/// Derives the recipient hash that the withdrawal circuit commits to, from the
+/// payout `Address`. This MUST match the frontend's `computeRecipientHash`:
+/// it takes the account's 32-byte Ed25519 key, splits it into the first 15 and
+/// last 17 bytes (each a big-endian field element), and Poseidon2-hashes them.
+/// Binding the proof's recipient public input to the actual payout address is
+/// what prevents a third party from front-running a withdrawal and redirecting
+/// the funds. Only account (G...) recipients are supported.
+fn recipient_hash_from_address(env: &Env, addr: &Address) -> Result<BytesN<32>, PoolError> {
+    let payload = addr.to_payload().ok_or(PoolError::UnsupportedRecipient)?;
+    let key = match payload {
+        AddressPayload::AccountIdPublicKeyEd25519(k) => k,
+        _ => return Err(PoolError::UnsupportedRecipient),
+    };
+    let k = key.to_array();
+    // Right-align each slice in a 32-byte buffer so the big-endian integer
+    // value matches the frontend's "0x00"-prefixed field encoding.
+    let mut lo = [0u8; 32];
+    lo[17..32].copy_from_slice(&k[0..15]);
+    let mut hi = [0u8; 32];
+    hi[15..32].copy_from_slice(&k[15..32]);
+    Ok(poseidon2_hash2(
+        env,
+        &BytesN::from_array(env, &lo),
+        &BytesN::from_array(env, &hi),
+    ))
 }
 
 fn zeroes_for_tree(env: &Env) -> Vec<BytesN<32>> {
@@ -182,6 +215,11 @@ impl PoolContract {
 
         let idx = next_index;
         env.storage().instance().set(&cm_key, &true);
+        // Store the commitment keyed by its leaf index so clients can
+        // reconstruct the full Merkle tree deterministically via contract
+        // calls, without depending on RPC event retention.
+        let ci_key = (key_commitment_by_index_prefix(), idx);
+        env.storage().instance().set(&ci_key, &commitment);
         DepositEvent {
             idx: &idx,
             commitment: &commitment,
@@ -241,7 +279,7 @@ impl PoolContract {
 
         let (root_arr, nf_arr, recipient_arr) = parse_public_inputs(&public_inputs)?;
         let nf_from_proof = BytesN::from_array(&env, &nf_arr);
-        let _recipient_from_proof = BytesN::from_array(&env, &recipient_arr);
+        let recipient_from_proof = BytesN::from_array(&env, &recipient_arr);
 
         let nf_key = (key_nullifier_prefix(), nf_from_proof.clone());
         if env.storage().instance().has(&nf_key) {
@@ -281,6 +319,15 @@ impl PoolContract {
         }
         if !root_valid {
             return Err(PoolError::RootMismatch);
+        }
+
+        // Bind the proof to the actual payout recipient. The proof commits to a
+        // recipient hash as a public input; if the caller tries to redirect the
+        // funds to a different address (front-running), the recomputed hash will
+        // not match and the withdrawal is rejected.
+        let expected_recipient = recipient_hash_from_address(&env, &recipient)?;
+        if expected_recipient != recipient_from_proof {
+            return Err(PoolError::RecipientMismatch);
         }
 
         let verifier: Address = env
@@ -329,6 +376,38 @@ impl PoolContract {
             .unwrap_or(0u32)
     }
 
+    /// Returns the commitment stored at the given leaf index, if any.
+    pub fn get_commitment(env: Env, index: u32) -> Option<BytesN<32>> {
+        let ci_key = (key_commitment_by_index_prefix(), index);
+        env.storage().instance().get(&ci_key)
+    }
+
+    /// Returns every commitment in leaf order (indices 0..next_index). Clients
+    /// use this to rebuild the Merkle tree deterministically for withdrawal
+    /// proofs, independent of RPC event retention. Any missing slot is returned
+    /// as the zero leaf so positions always line up with leaf indices.
+    pub fn get_commitments(env: Env) -> soroban_sdk::Vec<BytesN<32>> {
+        let next_index: u32 = env
+            .storage()
+            .instance()
+            .get(&key_next_index())
+            .unwrap_or(0u32);
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        let mut out = SorobanVec::new(&env);
+        let mut i = 0u32;
+        while i < next_index {
+            let ci_key = (key_commitment_by_index_prefix(), i);
+            let c: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&ci_key)
+                .unwrap_or_else(|| zero.clone());
+            out.push_back(c);
+            i += 1;
+        }
+        out
+    }
+
     pub fn get_token(env: Env) -> Result<Address, PoolError> {
         env.storage()
             .instance()
@@ -348,14 +427,134 @@ impl PoolContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::Address as TestAddress, token::StellarAssetClient, token::TokenClient, Address,
-        Env,
+        testutils::Address as TestAddress,
+        token::StellarAssetClient,
+        token::TokenClient,
+        Address, Env,
     };
 
     fn dummy_commitment(env: &Env, seed: u8) -> BytesN<32> {
         let mut arr = [0u8; 32];
         arr[0] = seed;
         BytesN::from_array(env, &arr)
+    }
+
+    fn hex32(hex: &str) -> [u8; 32] {
+        let bytes = hex.as_bytes();
+        let mut out = [0u8; 32];
+        let mut i = 0;
+        while i < 32 {
+            let hi = (bytes[i * 2] as char).to_digit(16).unwrap() as u8;
+            let lo = (bytes[i * 2 + 1] as char).to_digit(16).unwrap() as u8;
+            out[i] = (hi << 4) | lo;
+            i += 1;
+        }
+        out
+    }
+
+    // The contract's on-chain Poseidon2 (soroban_poseidon) MUST produce the
+    // exact same digest as the Noir `Poseidon2::hash([a, b], 2)` used by the
+    // circuit and the frontend, otherwise the on-chain Merkle root will never
+    // match the root the withdrawal proof is generated against.
+    // `0x0b63a5...` is H(0, 0) as computed by the circuit/frontend
+    // (see frontend poseidon2.test.ts KNOWN_ZERO_HASH and e2e.sh Prover.toml).
+    const KNOWN_ZERO_HASH: &str =
+        "0b63a53787021a4a962a452c2921b3663aff1ffd8d5510540f8e659e782956f1";
+
+    #[test]
+    fn test_poseidon_matches_circuit_zero_hash() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        let h = poseidon2_hash2(&env, &zero, &zero);
+        let expected = BytesN::from_array(&env, &hex32(KNOWN_ZERO_HASH));
+        assert_eq!(
+            h, expected,
+            "contract Poseidon2 H(0,0) does not match circuit/frontend"
+        );
+    }
+
+    // H(1234, 0) as computed by the circuit/frontend
+    // (frontend poseidon2.test.ts KNOWN_NULLIFIER_HASH, e2e.sh Prover.toml).
+    // This pins NON-zero input encoding, which H(0,0) alone cannot catch.
+    const KNOWN_NULLIFIER_HASH: &str =
+        "2b0c9e50ac135931c5f87dff253337d63f6fe5f8b0f2489b92a5a9446cc4b3d2";
+
+    #[test]
+    fn test_poseidon_matches_circuit_nonzero() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        // 1234 = 0x04d2, big-endian in a 32-byte field element.
+        let mut a = [0u8; 32];
+        a[30] = 0x04;
+        a[31] = 0xd2;
+        let a_bytes = BytesN::from_array(&env, &a);
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        let h = poseidon2_hash2(&env, &a_bytes, &zero);
+        let expected = BytesN::from_array(&env, &hex32(KNOWN_NULLIFIER_HASH));
+        assert_eq!(
+            h, expected,
+            "contract Poseidon2 H(1234,0) does not match circuit/frontend"
+        );
+    }
+
+    #[test]
+    fn test_single_leaf_root_matches_circuit() {
+        // From e2e.sh Prover.toml: leaf = H(1234, 5678), inserted at index 0,
+        // yields this root. Validates H(non-zero, non-zero) plus the full
+        // zero-padded root chain against the circuit.
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let mut a = [0u8; 32];
+        a[30] = 0x04;
+        a[31] = 0xd2; // 1234
+        let mut b = [0u8; 32];
+        b[30] = 0x16;
+        b[31] = 0x2e; // 5678
+        let leaf = poseidon2_hash2(
+            &env,
+            &BytesN::from_array(&env, &a),
+            &BytesN::from_array(&env, &b),
+        );
+        let zeroes = zeroes_for_tree(&env);
+        let mut cur = leaf;
+        for depth in 0..TREE_DEPTH as usize {
+            cur = poseidon2_hash2(&env, &cur, &zeroes[depth]);
+        }
+        let expected = BytesN::from_array(
+            &env,
+            &hex32("0e829a70d5bfbb7c4ffe0be28454f1eefd47e898dfd330b0a4c61fc615453ed2"),
+        );
+        assert_eq!(cur, expected);
+    }
+
+    #[test]
+    fn test_reconstructed_root_matches_onchain_root_8() {
+        // Same invariant as the 5-leaf test but at 8 deposits (a full depth-3
+        // subtree), matching the scenario seen in the wallet.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        for seed in 1u8..=8 {
+            client.deposit(&depositor, &dummy_commitment(&env, seed));
+        }
+
+        let commitments = client.get_commitments();
+        let onchain_root = client.get_root().unwrap();
+        assert_eq!(rebuild_root(&env, &commitments), onchain_root);
+    }
+
+    #[test]
+    fn test_zero_subtree_matches_circuit() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let zeroes = zeroes_for_tree(&env);
+        // zeroes[1] is H(0,0) and must equal the circuit's known zero hash.
+        let expected = BytesN::from_array(&env, &hex32(KNOWN_ZERO_HASH));
+        assert_eq!(zeroes[1], expected);
     }
 
     fn setup_with_token(env: &Env) -> (Address, Address, Address) {
@@ -375,6 +574,30 @@ mod tests {
         );
         (pool_id, depositor, token_id.address())
     }
+
+    fn setup_multi_depositor(env: &Env) -> (Address, Address, Address, Address) {
+        env.mock_all_auths();
+        let admin = <Address as TestAddress>::generate(env);
+        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+        let sac = StellarAssetClient::new(env, &token_id.address());
+
+        let depositor1 = <Address as TestAddress>::generate(env);
+        let depositor2 = <Address as TestAddress>::generate(env);
+        sac.mint(&depositor1, &1_000_000_000);
+        sac.mint(&depositor2, &1_000_000_000);
+
+        let verifier_id = <Address as TestAddress>::generate(env);
+        let deposit_amount: i128 = 10_000_000;
+        let pool_id = env.register(
+            PoolContract,
+            (verifier_id, token_id.address(), deposit_amount),
+        );
+        (pool_id, depositor1, depositor2, token_id.address())
+    }
+
+    // ──────────────────────────────────────────────
+    //  Deposit: basic functionality
+    // ──────────────────────────────────────────────
 
     #[test]
     fn test_deposit_increments_index() {
@@ -410,6 +633,217 @@ mod tests {
     }
 
     #[test]
+    fn test_deposit_transfers_tokens() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, token_addr) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+        let token = TokenClient::new(&env, &token_addr);
+
+        let balance_before = token.balance(&depositor);
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&depositor, &c1);
+        let balance_after = token.balance(&depositor);
+
+        assert_eq!(balance_before - balance_after, 10_000_000);
+        assert_eq!(token.balance(&pool_id), 10_000_000);
+    }
+
+    #[test]
+    fn test_deposit_sequential_indices() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        for i in 0u8..5 {
+            let c = dummy_commitment(&env, i + 1);
+            let idx = client.deposit(&depositor, &c);
+            assert_eq!(idx, i as u32);
+        }
+        assert_eq!(client.get_next_index(), 5);
+    }
+
+    #[test]
+    fn test_deposit_accumulates_pool_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, token_addr) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+        let token = TokenClient::new(&env, &token_addr);
+
+        for i in 1u8..=4 {
+            let c = dummy_commitment(&env, i);
+            client.deposit(&depositor, &c);
+        }
+
+        assert_eq!(token.balance(&pool_id), 10_000_000 * 4);
+    }
+
+    #[test]
+    fn test_deposit_does_not_panic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        let idx = client.deposit(&depositor, &c1);
+        assert_eq!(idx, 0);
+        assert!(client.get_root().is_some());
+        assert_eq!(client.get_next_index(), 1);
+    }
+
+    // ──────────────────────────────────────────────
+    //  Deposit: multi-depositor
+    // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_get_commitment_by_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c0 = dummy_commitment(&env, 7);
+        let c1 = dummy_commitment(&env, 9);
+        client.deposit(&depositor, &c0);
+        client.deposit(&depositor, &c1);
+
+        assert_eq!(client.get_commitment(&0), Some(c0));
+        assert_eq!(client.get_commitment(&1), Some(c1));
+        assert_eq!(client.get_commitment(&2), None);
+    }
+
+    #[test]
+    fn test_get_commitments_returns_all_in_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let commits = [
+            dummy_commitment(&env, 1),
+            dummy_commitment(&env, 2),
+            dummy_commitment(&env, 3),
+        ];
+        for c in commits.iter() {
+            client.deposit(&depositor, c);
+        }
+
+        let all = client.get_commitments();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.get(0).unwrap(), commits[0]);
+        assert_eq!(all.get(1).unwrap(), commits[1]);
+        assert_eq!(all.get(2).unwrap(), commits[2]);
+    }
+
+    #[test]
+    fn test_get_commitments_empty_initially() {
+        let env = Env::default();
+        let (pool_id, _, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+        assert_eq!(client.get_commitments().len(), 0);
+    }
+
+    #[test]
+    fn test_reconstructed_root_matches_onchain_root() {
+        // The Merkle root rebuilt from get_commitments() (the exact data a
+        // client uses for a withdrawal proof) must equal the contract's own
+        // incrementally-maintained root. This is the invariant the wallet's
+        // withdraw flow depends on.
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        for seed in 1u8..=5 {
+            client.deposit(&depositor, &dummy_commitment(&env, seed));
+        }
+
+        let commitments = client.get_commitments();
+        let onchain_root = client.get_root().unwrap();
+        let rebuilt = rebuild_root(&env, &commitments);
+        assert_eq!(rebuilt, onchain_root);
+    }
+
+    // Rebuild a full Merkle root from an ordered list of leaves, exactly as a
+    // client would, using the same zero subtree values and pairing order as
+    // the contract's incremental insertion.
+    fn rebuild_root(env: &Env, commitments: &SorobanVec<BytesN<32>>) -> BytesN<32> {
+        let zeroes = zeroes_for_tree(env);
+        let mut level: Vec<BytesN<32>> = Vec::new();
+        for c in commitments.iter() {
+            level.push(c);
+        }
+        if level.is_empty() {
+            return zeroes[TREE_DEPTH as usize].clone();
+        }
+        for depth in 0..TREE_DEPTH as usize {
+            let mut next: Vec<BytesN<32>> = Vec::new();
+            let mut i = 0;
+            while i < level.len() {
+                let left = level[i].clone();
+                let right = if i + 1 < level.len() {
+                    level[i + 1].clone()
+                } else {
+                    zeroes[depth].clone()
+                };
+                next.push(poseidon2_hash2(env, &left, &right));
+                i += 2;
+            }
+            level = next;
+        }
+        level[0].clone()
+    }
+
+    #[test]
+    fn test_multiple_depositors_independent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, d1, d2, token_addr) = setup_multi_depositor(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+        let token = TokenClient::new(&env, &token_addr);
+
+        let c1 = dummy_commitment(&env, 1);
+        let c2 = dummy_commitment(&env, 2);
+
+        let idx1 = client.deposit(&d1, &c1);
+        let idx2 = client.deposit(&d2, &c2);
+
+        assert_eq!(idx1, 0);
+        assert_eq!(idx2, 1);
+        assert_eq!(token.balance(&pool_id), 20_000_000);
+    }
+
+    #[test]
+    fn test_same_commitment_different_depositors_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, d1, d2, _) = setup_multi_depositor(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c = dummy_commitment(&env, 1);
+        client.deposit(&d1, &c);
+
+        let result = client.try_deposit(&d2, &c);
+        assert_eq!(result.err().unwrap().unwrap(), PoolError::CommitmentExists);
+    }
+
+    // ──────────────────────────────────────────────
+    //  Deposit: error cases
+    // ──────────────────────────────────────────────
+
+    #[test]
     fn test_duplicate_commitment_fails() {
         let env = Env::default();
         env.mock_all_auths();
@@ -423,6 +857,151 @@ mod tests {
         let result = client.try_deposit(&depositor, &c1);
         assert_eq!(result.err().unwrap().unwrap(), PoolError::CommitmentExists);
     }
+
+    #[test]
+    fn test_deposit_requires_auth() {
+        let env = Env::default();
+        // intentionally NOT calling mock_all_auths
+        env.cost_estimate().budget().reset_unlimited();
+        let admin = <Address as TestAddress>::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+
+        let depositor = <Address as TestAddress>::generate(&env);
+        let verifier_id = <Address as TestAddress>::generate(&env);
+        let pool_id = env.register(
+            PoolContract,
+            (verifier_id, token_id.address(), 10_000_000i128),
+        );
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        let result = client.try_deposit(&depositor, &c1);
+        assert!(result.is_err());
+    }
+
+    // ──────────────────────────────────────────────
+    //  Deposit: Merkle tree properties
+    // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_multiple_deposits_different_roots() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&depositor, &c1);
+        let root1 = client.get_root().unwrap();
+
+        let c2 = dummy_commitment(&env, 2);
+        client.deposit(&depositor, &c2);
+        let root2 = client.get_root().unwrap();
+
+        assert_ne!(root1, root2);
+    }
+
+    #[test]
+    fn test_same_commitment_sequence_produces_deterministic_root() {
+        let env1 = Env::default();
+        env1.mock_all_auths();
+        env1.cost_estimate().budget().reset_unlimited();
+        let (pool1, dep1, _) = setup_with_token(&env1);
+        let client1 = PoolContractClient::new(&env1, &pool1);
+
+        let env2 = Env::default();
+        env2.mock_all_auths();
+        env2.cost_estimate().budget().reset_unlimited();
+        let (pool2, dep2, _) = setup_with_token(&env2);
+        let client2 = PoolContractClient::new(&env2, &pool2);
+
+        let c = dummy_commitment(&env1, 42);
+        client1.deposit(&dep1, &c);
+
+        let c = dummy_commitment(&env2, 42);
+        client2.deposit(&dep2, &c);
+
+        assert_eq!(client1.get_root().unwrap(), client2.get_root().unwrap());
+    }
+
+    #[test]
+    fn test_root_changes_each_deposit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let mut prev_root: Option<BytesN<32>> = None;
+        for i in 1u8..=4 {
+            let c = dummy_commitment(&env, i);
+            client.deposit(&depositor, &c);
+            let root = client.get_root().unwrap();
+            if let Some(pr) = &prev_root {
+                assert_ne!(pr, &root);
+            }
+            prev_root = Some(root);
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    //  Deposit: root history
+    // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_root_history_accepts_old_root() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&depositor, &c1);
+        let root_after_first = client.get_root().unwrap();
+
+        let c2 = dummy_commitment(&env, 2);
+        client.deposit(&depositor, &c2);
+        let root_after_second = client.get_root().unwrap();
+        assert_ne!(root_after_first, root_after_second);
+
+        let mut pi = [0u8; 96];
+        pi[..32].copy_from_slice(&root_after_first.to_array());
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let recipient = <Address as TestAddress>::generate(&env);
+        let result = client.try_withdraw(&recipient, &public_inputs, &proof);
+        assert_ne!(result.err().unwrap().unwrap(), PoolError::RootMismatch);
+    }
+
+    #[test]
+    fn test_current_root_accepted_for_withdraw() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&depositor, &c1);
+        let current_root = client.get_root().unwrap();
+
+        let mut pi = [0u8; 96];
+        pi[..32].copy_from_slice(&current_root.to_array());
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let recipient = <Address as TestAddress>::generate(&env);
+        let result = client.try_withdraw(&recipient, &public_inputs, &proof);
+        // Should pass root check, fail at proof verification
+        assert_ne!(result.err().unwrap().unwrap(), PoolError::RootMismatch);
+    }
+
+    // ──────────────────────────────────────────────
+    //  Withdraw: error cases
+    // ──────────────────────────────────────────────
 
     #[test]
     fn test_nullifier_unused_by_default() {
@@ -446,24 +1025,6 @@ mod tests {
 
         let result = client.try_withdraw(&recipient, &public_inputs, &proof);
         assert_eq!(result.err().unwrap().unwrap(), PoolError::RootNotSet);
-    }
-
-    #[test]
-    fn test_deposit_transfers_tokens() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.cost_estimate().budget().reset_unlimited();
-        let (pool_id, depositor, token_addr) = setup_with_token(&env);
-        let client = PoolContractClient::new(&env, &pool_id);
-        let token = TokenClient::new(&env, &token_addr);
-
-        let balance_before = token.balance(&depositor);
-        let c1 = dummy_commitment(&env, 1);
-        client.deposit(&depositor, &c1);
-        let balance_after = token.balance(&depositor);
-
-        assert_eq!(balance_before - balance_after, 10_000_000);
-        assert_eq!(token.balance(&pool_id), 10_000_000);
     }
 
     #[test]
@@ -511,6 +1072,50 @@ mod tests {
     }
 
     #[test]
+    fn test_withdraw_empty_public_inputs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&depositor, &c1);
+
+        let recipient = <Address as TestAddress>::generate(&env);
+        let empty_inputs = Bytes::from_slice(&env, &[]);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_withdraw(&recipient, &empty_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::InvalidPublicInputs
+        );
+    }
+
+    #[test]
+    fn test_withdraw_oversized_public_inputs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&depositor, &c1);
+
+        let recipient = <Address as TestAddress>::generate(&env);
+        let big_inputs = Bytes::from_slice(&env, &[0u8; 128]);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_withdraw(&recipient, &big_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::InvalidPublicInputs
+        );
+    }
+
+    #[test]
     fn test_withdraw_root_mismatch() {
         let env = Env::default();
         env.mock_all_auths();
@@ -532,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_deposits_different_roots() {
+    fn test_withdraw_zero_length_proof() {
         let env = Env::default();
         env.mock_all_auths();
         env.cost_estimate().budget().reset_unlimited();
@@ -541,14 +1146,132 @@ mod tests {
 
         let c1 = dummy_commitment(&env, 1);
         client.deposit(&depositor, &c1);
-        let root1 = client.get_root().unwrap();
 
-        let c2 = dummy_commitment(&env, 2);
-        client.deposit(&depositor, &c2);
-        let root2 = client.get_root().unwrap();
+        let recipient = <Address as TestAddress>::generate(&env);
+        let public_inputs = Bytes::from_slice(&env, &[0u8; 96]);
+        let empty_proof = Bytes::from_slice(&env, &[]);
 
-        assert_ne!(root1, root2);
+        let result = client.try_withdraw(&recipient, &public_inputs, &empty_proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::VerificationFailed
+        );
     }
+
+    // ──────────────────────────────────────────────
+    //  Withdraw: recipient binding (front-running protection)
+    // ──────────────────────────────────────────────
+
+    // A real account (G...) address whose Ed25519 key we can hash.
+    const ACCOUNT_STRKEY: &str =
+        "GDBPMKMMG3TP3HHC7TXXUCU6ZOJG6RVQIIKCUTBYNFVXIZOLASH2IYXY";
+
+    #[test]
+    fn test_recipient_hash_matches_frontend() {
+        // The contract's recipient hash MUST equal the frontend's
+        // computeRecipientHash for the same account, or every legitimate
+        // withdrawal would be rejected. This value was produced by the
+        // frontend (poseidon2.ts) for ACCOUNT_STRKEY.
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let recipient = Address::from_str(&env, ACCOUNT_STRKEY);
+        let h = recipient_hash_from_address(&env, &recipient).unwrap();
+        let expected = BytesN::from_array(
+            &env,
+            &hex32("00ad77fd5de761a47844a8ce4405e9c67cd3a9518b78f7bd275da96a604da53f"),
+        );
+        assert_eq!(h, expected, "contract recipient hash != frontend");
+    }
+
+    #[test]
+    fn test_withdraw_recipient_mismatch_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        client.deposit(&depositor, &dummy_commitment(&env, 1));
+        let root = client.get_root().unwrap();
+
+        let recipient = Address::from_str(&env, ACCOUNT_STRKEY);
+
+        // Valid root, but the recipient hash in the proof does NOT correspond to
+        // `recipient` — simulating a front-runner swapping in their own address.
+        let mut pi = [0u8; 96];
+        pi[..32].copy_from_slice(&root.to_array());
+        for b in pi[64..96].iter_mut() {
+            *b = 0xAA;
+        }
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_withdraw(&recipient, &public_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::RecipientMismatch
+        );
+    }
+
+    #[test]
+    fn test_withdraw_correct_recipient_passes_binding() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        client.deposit(&depositor, &dummy_commitment(&env, 1));
+        let root = client.get_root().unwrap();
+
+        let recipient = Address::from_str(&env, ACCOUNT_STRKEY);
+        // The hash the contract derives for this recipient — what a real proof
+        // for this recipient would commit to.
+        let correct = recipient_hash_from_address(&env, &recipient).unwrap();
+
+        let mut pi = [0u8; 96];
+        pi[..32].copy_from_slice(&root.to_array());
+        pi[64..96].copy_from_slice(&correct.to_array());
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_withdraw(&recipient, &public_inputs, &proof);
+        // Recipient binding passes; the (dummy) proof fails verification instead.
+        assert_ne!(
+            result.err().unwrap().unwrap(),
+            PoolError::RecipientMismatch
+        );
+    }
+
+    #[test]
+    fn test_withdraw_contract_recipient_unsupported() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        client.deposit(&depositor, &dummy_commitment(&env, 1));
+        let root = client.get_root().unwrap();
+
+        // A generated test address is a contract (C...) address; withdrawals to
+        // contracts aren't supported by the recipient-binding scheme.
+        let recipient = <Address as TestAddress>::generate(&env);
+        let mut pi = [0u8; 96];
+        pi[..32].copy_from_slice(&root.to_array());
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_withdraw(&recipient, &public_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::UnsupportedRecipient
+        );
+    }
+
+    // ──────────────────────────────────────────────
+    //  Getters / constructor
+    // ──────────────────────────────────────────────
 
     #[test]
     fn test_get_token_and_amount() {
@@ -561,32 +1284,75 @@ mod tests {
     }
 
     #[test]
-    fn test_root_history_accepts_old_root() {
+    fn test_initial_state_no_root() {
+        let env = Env::default();
+        let (pool_id, _, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        assert!(client.get_root().is_none());
+        assert_eq!(client.get_next_index(), 0);
+    }
+
+    #[test]
+    fn test_parse_public_inputs_boundary() {
+        let bytes95 = Bytes::from_slice(&Env::default(), &[0u8; 95]);
+        let result = parse_public_inputs(&bytes95);
+        assert_eq!(result.err().unwrap(), PoolError::InvalidPublicInputs);
+
+        let bytes97 = Bytes::from_slice(&Env::default(), &[0u8; 97]);
+        let result = parse_public_inputs(&bytes97);
+        assert_eq!(result.err().unwrap(), PoolError::InvalidPublicInputs);
+
+        let mut arr96 = [0u8; 96];
+        arr96[0] = 0xAA;
+        arr96[32] = 0xBB;
+        arr96[64] = 0xCC;
+        let bytes96 = Bytes::from_slice(&Env::default(), &arr96);
+        let (root, nf, recip) = parse_public_inputs(&bytes96).unwrap();
+        assert_eq!(root[0], 0xAA);
+        assert_eq!(nf[0], 0xBB);
+        assert_eq!(recip[0], 0xCC);
+    }
+
+    // ──────────────────────────────────────────────
+    //  Security: nullifier double-spend protection
+    // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_multiple_distinct_nullifiers_independent() {
+        let env = Env::default();
+        let (pool_id, _, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        for i in 0u8..10 {
+            let nf = dummy_commitment(&env, i);
+            assert!(!client.is_nullifier_used(&nf));
+        }
+    }
+
+    #[test]
+    fn test_zero_commitment_valid() {
         let env = Env::default();
         env.mock_all_auths();
         env.cost_estimate().budget().reset_unlimited();
         let (pool_id, depositor, _) = setup_with_token(&env);
         let client = PoolContractClient::new(&env, &pool_id);
 
-        let c1 = dummy_commitment(&env, 1);
-        client.deposit(&depositor, &c1);
-        let root_after_first = client.get_root().unwrap();
+        let zero_cm = BytesN::from_array(&env, &[0u8; 32]);
+        let idx = client.deposit(&depositor, &zero_cm);
+        assert_eq!(idx, 0);
+    }
 
-        let c2 = dummy_commitment(&env, 2);
-        client.deposit(&depositor, &c2);
-        let root_after_second = client.get_root().unwrap();
-        assert_ne!(root_after_first, root_after_second);
+    #[test]
+    fn test_max_value_commitment_valid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
 
-        // A withdraw using the OLD root should still pass root validation
-        // (it will fail at proof verification, but NOT at root mismatch)
-        let mut pi = [0u8; 96];
-        pi[..32].copy_from_slice(&root_after_first.to_array());
-        let public_inputs = Bytes::from_slice(&env, &pi);
-        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
-
-        let recipient = <Address as TestAddress>::generate(&env);
-        let result = client.try_withdraw(&recipient, &public_inputs, &proof);
-        // Should fail with VerificationFailed (bad proof), NOT RootMismatch
-        assert_ne!(result.err().unwrap().unwrap(), PoolError::RootMismatch);
+        let max_cm = BytesN::from_array(&env, &[0xFF; 32]);
+        let idx = client.deposit(&depositor, &max_cm);
+        assert_eq!(idx, 0);
     }
 }

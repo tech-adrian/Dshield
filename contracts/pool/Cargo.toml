@@ -7,10 +7,13 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-soroban-sdk = { workspace = true, features = ["alloc"] }
+# hazmat-address: used to derive a deterministic recipient identifier from the
+# payout Address so the withdrawal proof can be bound to its recipient (NOT for
+# signature auth). See `recipient_hash_from_address` in src/lib.rs.
+soroban-sdk = { workspace = true, features = ["alloc", "hazmat-address"] }
 soroban-poseidon = "26.0.0"
 ultrahonk_soroban_verifier = { git = "https://github.com/yugocabrio/rs-soroban-ultrahonk", default-features = false }
 
 [dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils", "alloc"] }
+soroban-sdk = { workspace = true, features = ["testutils", "alloc", "hazmat-address"] }
 soroban-env-host = "26.1.3"
