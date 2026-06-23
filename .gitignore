@@ -14,5 +14,8 @@ circuits/*/target/
 node_modules/
 .next/
 
+# Test snapshots
+**/__snapshots__/
+
 # OS
 .DS_Store
