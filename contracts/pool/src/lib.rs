@@ -81,6 +81,30 @@ const TREE_DEPTH: u32 = 20;
 const MAX_LEAVES: u32 = 1u32 << TREE_DEPTH;
 const ROOT_HISTORY_SIZE: u32 = 30;
 
+// Storage TTL management. Commitments, the commitment-by-index map, and
+// nullifiers grow without bound (one entry per deposit/withdrawal), so they
+// live in PERSISTENT storage — loaded on demand and not subject to the
+// instance entry's size cap (the instance entry is read in full on every call).
+// Bounded data (config, root, frontier[20], root history[30], indices) stays in
+// instance storage. TTLs are extended so entries survive well beyond a demo.
+const BUMP_THRESHOLD: u32 = 17_280; // ~1 day of ledgers
+const BUMP_AMOUNT: u32 = 518_400; // ~30 days of ledgers
+
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(BUMP_THRESHOLD, BUMP_AMOUNT);
+}
+
+fn bump_persistent<K>(env: &Env, key: &K)
+where
+    K: soroban_sdk::IntoVal<Env, Val>,
+{
+    env.storage()
+        .persistent()
+        .extend_ttl(key, BUMP_THRESHOLD, BUMP_AMOUNT);
+}
+
 fn poseidon2_hash2(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
     let modulus = <BnScalar as Field>::modulus(env);
     let a_bytes = Bytes::from_array(env, &a.to_array());
@@ -183,9 +207,10 @@ impl PoolContract {
 
     pub fn deposit(env: Env, depositor: Address, commitment: BytesN<32>) -> Result<u32, PoolError> {
         depositor.require_auth();
+        bump_instance(&env);
 
         let cm_key = (key_commitment_prefix(), commitment.clone());
-        if env.storage().instance().has(&cm_key) {
+        if env.storage().persistent().has(&cm_key) {
             return Err(PoolError::CommitmentExists);
         }
 
@@ -214,12 +239,14 @@ impl PoolContract {
         }
 
         let idx = next_index;
-        env.storage().instance().set(&cm_key, &true);
+        env.storage().persistent().set(&cm_key, &true);
+        bump_persistent(&env, &cm_key);
         // Store the commitment keyed by its leaf index so clients can
         // reconstruct the full Merkle tree deterministically via contract
         // calls, without depending on RPC event retention.
         let ci_key = (key_commitment_by_index_prefix(), idx);
-        env.storage().instance().set(&ci_key, &commitment);
+        env.storage().persistent().set(&ci_key, &commitment);
+        bump_persistent(&env, &ci_key);
         DepositEvent {
             idx: &idx,
             commitment: &commitment,
@@ -276,13 +303,14 @@ impl PoolContract {
         if proof_bytes.len() as usize != PROOF_BYTES {
             return Err(PoolError::VerificationFailed);
         }
+        bump_instance(&env);
 
         let (root_arr, nf_arr, recipient_arr) = parse_public_inputs(&public_inputs)?;
         let nf_from_proof = BytesN::from_array(&env, &nf_arr);
         let recipient_from_proof = BytesN::from_array(&env, &recipient_arr);
 
         let nf_key = (key_nullifier_prefix(), nf_from_proof.clone());
-        if env.storage().instance().has(&nf_key) {
+        if env.storage().persistent().has(&nf_key) {
             return Err(PoolError::NullifierUsed);
         }
 
@@ -351,7 +379,8 @@ impl PoolContract {
         let contract_addr = env.current_contract_address();
         token::Client::new(&env, &token_addr).transfer(&contract_addr, &recipient, &amount);
 
-        env.storage().instance().set(&nf_key, &true);
+        env.storage().persistent().set(&nf_key, &true);
+        bump_persistent(&env, &nf_key);
         WithdrawEvent {
             nullifier_hash: &nf_from_proof,
         }
@@ -362,7 +391,7 @@ impl PoolContract {
 
     pub fn is_nullifier_used(env: Env, nullifier_hash: BytesN<32>) -> bool {
         let nf_key = (key_nullifier_prefix(), nullifier_hash);
-        env.storage().instance().has(&nf_key)
+        env.storage().persistent().has(&nf_key)
     }
 
     pub fn get_root(env: Env) -> Option<BytesN<32>> {
@@ -379,7 +408,7 @@ impl PoolContract {
     /// Returns the commitment stored at the given leaf index, if any.
     pub fn get_commitment(env: Env, index: u32) -> Option<BytesN<32>> {
         let ci_key = (key_commitment_by_index_prefix(), index);
-        env.storage().instance().get(&ci_key)
+        env.storage().persistent().get(&ci_key)
     }
 
     /// Returns every commitment in leaf order (indices 0..next_index). Clients
@@ -399,7 +428,7 @@ impl PoolContract {
             let ci_key = (key_commitment_by_index_prefix(), i);
             let c: BytesN<32> = env
                 .storage()
-                .instance()
+                .persistent()
                 .get(&ci_key)
                 .unwrap_or_else(|| zero.clone());
             out.push_back(c);
@@ -1317,6 +1346,48 @@ mod tests {
     // ──────────────────────────────────────────────
     //  Security: nullifier double-spend protection
     // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_nullifier_read_from_persistent_storage() {
+        // Lock in the storage location: is_nullifier_used must read PERSISTENT
+        // storage (where withdraw writes used nullifiers). If it read instance
+        // storage, this persistent write would be invisible and the assert
+        // would fail — catching an accidental regression back to instance.
+        let env = Env::default();
+        let (pool_id, _, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let nf = dummy_commitment(&env, 42);
+        assert!(!client.is_nullifier_used(&nf));
+        env.as_contract(&pool_id, || {
+            let key = (key_nullifier_prefix(), nf.clone());
+            env.storage().persistent().set(&key, &true);
+        });
+        assert!(client.is_nullifier_used(&nf));
+    }
+
+    #[test]
+    fn test_commitment_read_from_persistent_storage() {
+        // Same guard for commitments-by-index (deposit writes them to
+        // persistent; get_commitment must read from there).
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c = dummy_commitment(&env, 7);
+        client.deposit(&depositor, &c);
+
+        // The value is in persistent storage, readable via as_contract.
+        let stored: Option<BytesN<32>> = env.as_contract(&pool_id, || {
+            env.storage()
+                .persistent()
+                .get(&(key_commitment_by_index_prefix(), 0u32))
+        });
+        assert_eq!(stored, Some(c.clone()));
+        assert_eq!(client.get_commitment(&0), Some(c));
+    }
 
     #[test]
     fn test_multiple_distinct_nullifiers_independent() {
