@@ -38,9 +38,19 @@ export function useWallet() {
 }
 
 export function WalletProvider({ children }: { children: ReactNode }) {
-  const [address, setAddress] = useState<string | null>(null);
-  const [isConnecting, setIsConnecting] = useState(false);
   const initialized = useRef(false);
+  const [address, setAddress] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const devKeypair = getDevKeypair();
+    if (devKeypair) {
+      const addr = devKeypair.publicKey();
+      localStorage.setItem("dshield_wallet", addr);
+      return addr;
+    }
+    const saved = localStorage.getItem("dshield_wallet");
+    return saved || null;
+  });
+  const [isConnecting, setIsConnecting] = useState(false);
 
   useEffect(() => {
     if (initialized.current) return;
@@ -57,20 +67,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         new AlbedoModule(),
       ],
     });
-
-    // In dev-key mode the app always acts as the configured account. Ignore any
-    // stale saved wallet (e.g. a previously connected Freighter address that has
-    // no USDC trustline) so deposits use the funded dev account.
-    const devKeypair = getDevKeypair();
-    if (devKeypair) {
-      const addr = devKeypair.publicKey();
-      setAddress(addr);
-      localStorage.setItem("dshield_wallet", addr);
-      return;
-    }
-
-    const saved = localStorage.getItem("dshield_wallet");
-    if (saved) setAddress(saved);
   }, []);
 
   const connect = useCallback(async () => {
