@@ -115,6 +115,21 @@ deploy: build
 e2e: start fund deploy
     @echo "End-to-end pipeline complete."
 
+# Run contract unit tests
+test-contracts:
+    cargo test --workspace
+
+# Run frontend unit tests
+test-frontend:
+    cd frontend && pnpm test
+
+# Run all unit tests
+test: test-contracts test-frontend
+
+# Run E2E integration tests
+test-e2e:
+    ./tests/e2e.sh
+
 # Clean up artifacts and containers
 clean:
     stellar container stop stellar-local 2>/dev/null || true
