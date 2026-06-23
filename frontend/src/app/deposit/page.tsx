@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useWallet } from "@/components/WalletProvider";
 import {
   buildContractCall,
@@ -29,30 +29,20 @@ export default function DepositPage() {
   const [status, setStatus] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
   const [lastCommitment, setLastCommitment] = useState<string>("");
-  const [tiers, setTiers] = useState<PoolTier[]>([]);
-  const [selectedTier, setSelectedTier] = useState<PoolTier | null>(null);
   const [customAmount, setCustomAmount] = useState<string>("");
-  const [noteCount, setNoteCount] = useState<number>(1);
-
-  useEffect(() => {
+  const [tiers] = useState<PoolTier[]>(() => getPoolTiers());
+  const [selectedTier, setSelectedTier] = useState<PoolTier | null>(() => {
     const t = getPoolTiers();
-    setTiers(t);
-    if (t.length > 0) setSelectedTier(t[0]);
-  }, []);
+    return t.length > 0 ? t[0] : null;
+  });
 
-  useEffect(() => {
-    if (!customAmount || !selectedTier) {
-      setNoteCount(1);
-      return;
-    }
+  const noteCount = (() => {
+    if (!customAmount || !selectedTier) return 1;
     const usdc = parseFloat(customAmount);
-    if (isNaN(usdc) || usdc <= 0) {
-      setNoteCount(0);
-      return;
-    }
+    if (isNaN(usdc) || usdc <= 0) return 0;
     const tierUsdc = selectedTier.amount / 10 ** TOKEN_DECIMALS;
-    setNoteCount(Math.floor(usdc / tierUsdc));
-  }, [customAmount, selectedTier]);
+    return Math.floor(usdc / tierUsdc);
+  })();
 
   const totalNotes = customAmount ? noteCount : 1;
 
