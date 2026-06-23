@@ -8,6 +8,90 @@ const DEV_SECRET_KEY = process.env.NEXT_PUBLIC_DEV_SECRET_KEY || "";
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID || "";
 export const COMPLIANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID || "";
 
+// Test USDC asset wrapped as a Stellar Asset Contract. Classic assets require
+// a trustline before an account can hold them; these let the app establish the
+// trustline and faucet test USDC so any wallet can use the demo.
+export const USDC_CODE = process.env.NEXT_PUBLIC_USDC_CODE || "USDC";
+export const USDC_ISSUER = process.env.NEXT_PUBLIC_USDC_ISSUER || "";
+// Localnet-only faucet key (throwaway). Used to mint test USDC client-side.
+const USDC_ISSUER_SECRET = process.env.NEXT_PUBLIC_USDC_ISSUER_SECRET || "";
+
+export function getUsdcAsset(): StellarSdk.Asset | null {
+  if (!USDC_ISSUER) return null;
+  return new StellarSdk.Asset(USDC_CODE, USDC_ISSUER);
+}
+
+/**
+ * Returns true if the account already trusts (can hold) the test USDC asset.
+ * On RPC-only localnets we can't read classic trustlines directly, so we probe
+ * the SAC `balance` view: it simulates fine for a trusting account (even with a
+ * 0 balance) and fails when the trustline is missing.
+ */
+export async function hasUsdcTrustline(address: string): Promise<boolean> {
+  const sac = getUsdcSacId();
+  if (!sac) return true; // no asset configured -> nothing to enforce
+  const result = await queryContract(sac, "balance", [
+    StellarSdk.nativeToScVal(address, { type: "address" }),
+  ]);
+  return result !== null;
+}
+
+export function getUsdcSacId(): string | null {
+  const asset = getUsdcAsset();
+  if (!asset) return null;
+  return asset.contractId(getNetworkPassphrase());
+}
+
+/**
+ * Ensure `address` has a USDC trustline, establishing one (signed by the
+ * connected wallet) if missing. No-op when already trusted or no asset set.
+ */
+export async function ensureUsdcTrustline(
+  address: string,
+  signTransaction: (xdr: string) => Promise<string>,
+): Promise<void> {
+  const asset = getUsdcAsset();
+  if (!asset) return;
+  if (await hasUsdcTrustline(address)) return;
+
+  const server = getRpcServer();
+  const account = await server.getAccount(address);
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: StellarSdk.BASE_FEE,
+    networkPassphrase: getNetworkPassphrase(),
+  })
+    .addOperation(StellarSdk.Operation.changeTrust({ asset }))
+    .setTimeout(60)
+    .build();
+
+  const signedXdr = await signTransaction(tx.toXDR());
+  await submitTransaction(signedXdr);
+}
+
+/**
+ * Mint test USDC to `address` using the localnet issuer key. Requires the
+ * recipient to already have a trustline. No-op if no issuer secret is set.
+ */
+export async function faucetUsdc(
+  address: string,
+  amount: bigint | number,
+): Promise<void> {
+  const sac = getUsdcSacId();
+  if (!sac || !USDC_ISSUER_SECRET) return;
+  const issuer = StellarSdk.Keypair.fromSecret(USDC_ISSUER_SECRET);
+  const tx = await buildContractCall(
+    sac,
+    "mint",
+    [
+      StellarSdk.nativeToScVal(address, { type: "address" }),
+      StellarSdk.nativeToScVal(BigInt(amount), { type: "i128" }),
+    ],
+    issuer.publicKey(),
+  );
+  tx.sign(issuer);
+  await submitTransaction(tx.toXDR());
+}
+
 export interface PoolTier {
   id: string;
   label: string;
