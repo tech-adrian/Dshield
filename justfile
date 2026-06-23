@@ -95,14 +95,18 @@ deploy network="local": build
     fi
     echo "Deploying to network: $NETWORK"
 
-    # Ensure the deployer + issuer exist and are funded (friendbot is
-    # idempotent). On testnet this funds via the public friendbot.
+    # Ensure the deployer + issuer + relayer exist and are funded (friendbot is
+    # idempotent). On testnet this funds via the public friendbot. The relayer
+    # submits withdrawals on users' behalf so their accounts stay off-chain.
     stellar keys generate alice --network "$NETWORK" 2>/dev/null || true
     stellar keys generate usdc-issuer --network "$NETWORK" 2>/dev/null || true
+    stellar keys generate relayer --network "$NETWORK" 2>/dev/null || true
     ALICE_ADDR=$(stellar keys address alice)
     ISSUER_ADDR=$(stellar keys address usdc-issuer)
+    RELAYER_ADDR=$(stellar keys address relayer)
     curl -s "${FRIENDBOT}${ALICE_ADDR}" >/dev/null 2>&1 || true
     curl -s "${FRIENDBOT}${ISSUER_ADDR}" >/dev/null 2>&1 || true
+    curl -s "${FRIENDBOT}${RELAYER_ADDR}" >/dev/null 2>&1 || true
 
     echo "Deploying verifier contract..."
     VERIFIER_ID=$(stellar contract deploy \
@@ -178,13 +182,15 @@ deploy network="local": build
     # holds USDC + the trustline. Throwaway key (local/testnet only).
     ALICE_SECRET=$(stellar keys show alice 2>/dev/null || stellar keys secret alice 2>/dev/null || true)
     ISSUER_SECRET=$(stellar keys show usdc-issuer 2>/dev/null || stellar keys secret usdc-issuer 2>/dev/null || true)
+    RELAYER_SECRET=$(stellar keys show relayer 2>/dev/null || stellar keys secret relayer 2>/dev/null || true)
     cat > frontend/.env.local <<EOF
     NEXT_PUBLIC_RPC_URL=$RPC_URL
     NEXT_PUBLIC_NETWORK_PASSPHRASE=$PASSPHRASE
     NEXT_PUBLIC_DEV_SECRET_KEY=$ALICE_SECRET
     NEXT_PUBLIC_USDC_CODE=USDC
     NEXT_PUBLIC_USDC_ISSUER=$ISSUER_ADDR
-    NEXT_PUBLIC_USDC_ISSUER_SECRET=$ISSUER_SECRET
+    USDC_ISSUER_SECRET=$ISSUER_SECRET
+    RELAYER_SECRET=$RELAYER_SECRET
     NEXT_PUBLIC_POOL_CONTRACT_ID=$POOL_10
     NEXT_PUBLIC_POOL_TIERS=10 USDC:$POOL_10:100000000,100 USDC:$POOL_100:1000000000,1000 USDC:$POOL_1000:10000000000
     NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID=$COMPLIANCE_ID
@@ -196,6 +202,17 @@ deploy network="local": build
 # Run the full end-to-end pipeline on localnet
 e2e: start fund deploy
     @echo "End-to-end pipeline complete."
+
+# Demo the privacy loop on-chain: deposit -> ZK proof -> relayed withdraw.
+# Run against the active deployment; needs a freshly deployed pool.
+# e.g. `just deploy testnet && just demo testnet`
+demo network="local":
+    bash scripts/demo.sh {{network}}
+
+# Demo the compliant-disclosure loop on-chain: register KYC -> ZK proof ->
+# verify_compliance, plus a negative KYC-gate check. e.g. `just demo-compliance testnet`
+demo-compliance network="local":
+    bash scripts/demo-compliance.sh {{network}}
 
 # Run contract unit tests
 test-contracts:

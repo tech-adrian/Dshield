@@ -143,6 +143,92 @@ Reveal only the specific information required by regulators while preserving ove
 
 ---
 
+## Implementation Status
+
+What is **built and verified on-chain today** (testnet), versus the broader vision above:
+
+| Capability | Status |
+| --- | --- |
+| Shielded deposit (USDC → commitment in a Merkle tree) | ✅ Working on testnet |
+| Client-side ZK proof (Noir + UltraHonk, keccak transform) | ✅ |
+| On-chain proof verification (Soroban + BN254/Poseidon2) | ✅ |
+| Shielded withdrawal to any recipient | ✅ |
+| Double-spend prevention (nullifiers) | ✅ |
+| Recipient binding (anti front-running) | ✅ |
+| **Relayer** — withdrawer's account never appears on-chain | ✅ |
+| Compliance: KYC registry + compliance proof verification | ✅ Verified on testnet (register KYC → prove → verify) |
+| Selective-disclosure / audit proof variants | 🚧 Design stage |
+| Arbitrary-amount private *transfers* between users | 🚧 Future (today: fixed-denomination pools) |
+
+DShield is currently a **fixed-denomination shielded pool** (Tornado-style: deposit a tier amount, withdraw it to any address). Privacy comes from breaking the on-chain link between depositor and recipient — not from hiding the tier amount. Relayed withdrawals mean the withdrawer never signs or pays a fee from their own account.
+
+---
+
+## Live on Testnet
+
+Deployed to Stellar **testnet** (`Test SDF Network ; September 2015`). View on [Stellar Expert](https://stellar.expert/explorer/testnet):
+
+| Contract | ID |
+| --- | --- |
+| Shielded pool (10 USDC tier) | `CBQ3EPNIMGLS53U4HHLT4V3HAGJJCLONVXAN2QEREGQZMFQOLK7VF6C7` |
+| UltraHonk verifier | `CA64EBZWHEXVBJRQ3U76MRDVZUMIOL6TYTGG6427URU3OV5D3ZLXNKCM` |
+| Compliance | `CDU7ARSZFXBGXHLUFO6AF3MDPVJNWBBOEGDI57FP3E2OR4I4M6DCVPDR` |
+| Test USDC (SAC) | `CDYZE3XQZA2UYUTYEEVLOKSYDD44CQZ6LYJIKQEDIUYBXNVSNXEQVGEG` |
+
+A full **deposit → relayed withdraw** loop has been executed on testnet: the pool paid the recipient, the nullifier was consumed, and re-submitting the same proof failed with `NullifierUsed`.
+
+---
+
+## Build, Run & Verify
+
+**Prerequisites:** Rust + `wasm32v1-none`, [`stellar` CLI](https://developers.stellar.org/docs/tools/cli), [Noir (`nargo`)](https://noir-lang.org/docs) + Barretenberg (`bb`), Node + `pnpm`, [`just`](https://github.com/casey/just). Run `just setup` to check.
+
+```bash
+# Run all tests (Rust contracts + frontend) — 85 contract + 50 frontend tests
+just test
+
+# Local: start a quickstart network, fund accounts, deploy everything,
+# and write frontend/.env.local
+just start && just deploy
+
+# Testnet: deploy all contracts and point the app at testnet
+just deploy testnet
+
+# Run the wallet UI
+cd frontend && pnpm install && pnpm dev   # http://localhost:3000
+```
+
+`just deploy` provisions the verifier, three pool tiers (10/100/1000 USDC), a test-USDC asset, a compliance contract, plus a **faucet issuer** and a **relayer** account, and writes the matching `frontend/.env.local`.
+
+---
+
+## One-Command Demo
+
+```bash
+just demo             # privacy loop: deposit -> ZK proof -> relayed withdraw
+just demo-compliance  # compliant disclosure: register KYC -> ZK proof -> verify
+```
+
+`just demo` runs the whole privacy loop on-chain and prints each step: it deposits into the pool, generates a real ZK proof bound to the recipient, submits the withdrawal **through the relayer** (so your account never appears on-chain), and verifies the recipient was paid and the nullifier consumed.
+
+`just demo-compliance` runs the compliant-disclosure loop: an admin registers a KYC hash, a real compliance proof (KYC ownership + note ownership + selective amount disclosure, bound to an auditor key) is generated, and the contract verifies it on-chain — plus a negative check proving an unregistered KYC hash is rejected. Both demos take the network as an argument (e.g. `just demo-compliance testnet`).
+
+---
+
+## Security Model
+
+Three properties hold the system together (each enforced on-chain and covered by tests):
+
+1. **Hash consistency** — the contract's Poseidon2 (`soroban_poseidon`) produces byte-identical output to the Noir circuit and the frontend, so the on-chain Merkle root always matches the root the proof is generated against. Locked by `test_recipient_hash_matches_frontend`, `test_single_leaf_root_matches_circuit`.
+2. **Recipient binding** — the withdrawal proof commits to a recipient hash, and the contract recomputes that hash from the actual payout address (`recipient_hash_from_address`) and rejects a mismatch. Without this, anyone could front-run a pending withdrawal and redirect the funds. This is also what makes the relayer trustless: it can submit or refuse, but never steal.
+3. **Double-spend prevention** — each withdrawal consumes a nullifier stored in persistent storage; replaying a proof fails with `NullifierUsed`.
+
+Unbounded data (commitments, nullifiers) lives in **persistent storage** with TTL extension, so the size-capped instance entry doesn't grow with usage.
+
+> ⚠️ Testnet demo only — unaudited. `frontend/.env.local` holds throwaway dev/faucet/relayer secrets and is gitignored; do not reuse them or carry this to mainnet without an audit. The relayer takes no fee (eats gas) and is a single point of censorship (not theft).
+
+---
+
 ## Why Stellar
 
 Stellar has recently introduced native support for modern ZK verification through Protocol 25 and Protocol 26.
