@@ -3,17 +3,12 @@
 import Link from "next/link";
 import { useWallet } from "@/components/WalletProvider";
 import { getActiveNotes, getNotes } from "@/lib/notes";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 export default function Home() {
   const { address } = useWallet();
-  const [noteCount, setNoteCount] = useState(0);
-  const [activeCount, setActiveCount] = useState(0);
-
-  useEffect(() => {
-    setNoteCount(getNotes().length);
-    setActiveCount(getActiveNotes().length);
-  }, []);
+  const [noteCount] = useState(() => getNotes().length);
+  const [activeCount] = useState(() => getActiveNotes().length);
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-16">
