@@ -137,3 +137,150 @@ impl ComplianceContract {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as TestAddress, Env};
+
+    fn vk_bytes(env: &Env) -> Bytes {
+        Bytes::from_slice(
+            env,
+            include_bytes!("../../../circuits/compliance/target/vk"),
+        )
+    }
+
+    fn dummy_hash(env: &Env, seed: u8) -> BytesN<32> {
+        let mut arr = [0u8; 32];
+        arr[0] = seed;
+        BytesN::from_array(env, &arr)
+    }
+
+    fn setup(env: &Env) -> (Address, Address) {
+        let admin = <Address as TestAddress>::generate(env);
+        let contract_id: Address =
+            env.register(ComplianceContract, (vk_bytes(env), admin.clone()));
+        (contract_id, admin)
+    }
+
+    #[test]
+    fn test_constructor_stores_vk() {
+        let env = Env::default();
+        let (contract_id, _admin) = setup(&env);
+        assert!(env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .has(&ComplianceContract::key_vk())
+        }));
+    }
+
+    #[test]
+    fn test_register_kyc_stores_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let kyc_hash = dummy_hash(&env, 1);
+        client.register_kyc(&kyc_hash);
+        assert!(client.is_kyc_registered(&kyc_hash));
+    }
+
+    #[test]
+    fn test_kyc_not_registered_returns_false() {
+        let env = Env::default();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let kyc_hash = dummy_hash(&env, 99);
+        assert!(!client.is_kyc_registered(&kyc_hash));
+    }
+
+    #[test]
+    fn test_register_kyc_requires_admin_auth() {
+        let env = Env::default();
+        // Do NOT mock auths — admin auth should be required
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let kyc_hash = dummy_hash(&env, 1);
+        let result = client.try_register_kyc(&kyc_hash);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_compliance_bad_public_inputs_length() {
+        let env = Env::default();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let bad_inputs = Bytes::from_slice(&env, &[0u8; 64]); // should be 128
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_verify_compliance(&bad_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            ComplianceError::InvalidPublicInputs
+        );
+    }
+
+    #[test]
+    fn test_verify_compliance_kyc_not_registered() {
+        let env = Env::default();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        // 128 bytes: merkle_root(32) + kyc_hash(32) + disclosed_amount(32) + auditor_key(32)
+        let mut pi = [0u8; 128];
+        pi[32] = 0xAB; // non-zero kyc_hash that is not registered
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_verify_compliance(&public_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            ComplianceError::KycNotRegistered
+        );
+    }
+
+    #[test]
+    fn test_verify_compliance_wrong_proof_length() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let kyc_hash = dummy_hash(&env, 0xAB);
+        client.register_kyc(&kyc_hash);
+
+        let mut pi = [0u8; 128];
+        pi[32] = 0xAB; // matching kyc_hash
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let bad_proof = Bytes::from_slice(&env, &[0u8; 100]);
+
+        let result = client.try_verify_compliance(&public_inputs, &bad_proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            ComplianceError::ProofParseError
+        );
+    }
+
+    #[test]
+    fn test_multiple_kyc_registrations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let h1 = dummy_hash(&env, 1);
+        let h2 = dummy_hash(&env, 2);
+        let h3 = dummy_hash(&env, 3);
+
+        client.register_kyc(&h1);
+        client.register_kyc(&h2);
+
+        assert!(client.is_kyc_registered(&h1));
+        assert!(client.is_kyc_registered(&h2));
+        assert!(!client.is_kyc_registered(&h3));
+    }
+}

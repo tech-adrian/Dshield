@@ -231,3 +231,191 @@ impl PoolContract {
             .unwrap_or(0u32)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as TestAddress, Address, Env};
+
+    fn dummy_commitment(env: &Env, seed: u8) -> BytesN<32> {
+        let mut arr = [0u8; 32];
+        arr[0] = seed;
+        BytesN::from_array(env, &arr)
+    }
+
+    fn setup(env: &Env) -> Address {
+        let verifier_id = <Address as TestAddress>::generate(env);
+        env.register(PoolContract, (verifier_id,))
+    }
+
+    #[test]
+    fn test_deposit_increments_index() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        assert_eq!(client.get_next_index(), 0);
+
+        let c1 = dummy_commitment(&env, 1);
+        let idx = client.deposit(&c1);
+        assert_eq!(idx, 0);
+        assert_eq!(client.get_next_index(), 1);
+
+        let c2 = dummy_commitment(&env, 2);
+        let idx2 = client.deposit(&c2);
+        assert_eq!(idx2, 1);
+        assert_eq!(client.get_next_index(), 2);
+    }
+
+    #[test]
+    fn test_deposit_sets_root() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        assert!(client.get_root().is_none());
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&c1);
+
+        let root = client.get_root();
+        assert!(root.is_some());
+    }
+
+    #[test]
+    fn test_deposit_returns_correct_index() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 42);
+        let idx = client.deposit(&c1);
+        assert_eq!(idx, 0);
+
+        let c2 = dummy_commitment(&env, 43);
+        let idx2 = client.deposit(&c2);
+        assert_eq!(idx2, 1);
+    }
+
+    #[test]
+    fn test_duplicate_commitment_fails() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&c1);
+
+        let result = client.try_deposit(&c1);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::CommitmentExists
+        );
+    }
+
+    #[test]
+    fn test_nullifier_unused_by_default() {
+        let env = Env::default();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let nf = dummy_commitment(&env, 99);
+        assert!(!client.is_nullifier_used(&nf));
+    }
+
+    #[test]
+    fn test_withdraw_no_root_fails() {
+        let env = Env::default();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let public_inputs = Bytes::from_slice(&env, &[0u8; 64]);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_withdraw(&public_inputs, &proof);
+        assert_eq!(result.err().unwrap().unwrap(), PoolError::RootNotSet);
+    }
+
+    #[test]
+    fn test_withdraw_wrong_proof_length() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&c1);
+
+        let public_inputs = Bytes::from_slice(&env, &[0u8; 64]);
+        let bad_proof = Bytes::from_slice(&env, &[0u8; 100]);
+
+        let result = client.try_withdraw(&public_inputs, &bad_proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::VerificationFailed
+        );
+    }
+
+    #[test]
+    fn test_withdraw_bad_public_inputs_length() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&c1);
+
+        let bad_inputs = Bytes::from_slice(&env, &[0u8; 32]);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_withdraw(&bad_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::InvalidPublicInputs
+        );
+    }
+
+    #[test]
+    fn test_withdraw_root_mismatch() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&c1);
+
+        // public_inputs has root (first 32 bytes) + nullifier_hash (next 32 bytes)
+        // Use a bogus root that won't match
+        let mut pi = [0u8; 64];
+        pi[0] = 0xFF; // wrong root
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_withdraw(&public_inputs, &proof);
+        assert_eq!(result.err().unwrap().unwrap(), PoolError::RootMismatch);
+    }
+
+    #[test]
+    fn test_multiple_deposits_different_roots() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let pool_id = setup(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let c1 = dummy_commitment(&env, 1);
+        client.deposit(&c1);
+        let root1 = client.get_root().unwrap();
+
+        let c2 = dummy_commitment(&env, 2);
+        client.deposit(&c2);
+        let root2 = client.get_root().unwrap();
+
+        assert_ne!(root1, root2);
+    }
+}

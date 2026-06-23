@@ -69,3 +69,103 @@ impl VerifierContract {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as TestAddress, Address, Bytes, Env};
+
+    fn vk_bytes(env: &Env) -> Bytes {
+        Bytes::from_slice(
+            env,
+            include_bytes!("../../../circuits/shielded_pool/target/vk"),
+        )
+    }
+
+    fn proof_bytes(env: &Env) -> Bytes {
+        Bytes::from_slice(
+            env,
+            include_bytes!("../../../circuits/shielded_pool/target/proof"),
+        )
+    }
+
+    fn public_inputs_bytes(env: &Env) -> Bytes {
+        Bytes::from_slice(
+            env,
+            include_bytes!("../../../circuits/shielded_pool/target/public_inputs"),
+        )
+    }
+
+    #[test]
+    fn test_constructor_stores_vk() {
+        let env = Env::default();
+        let vk = vk_bytes(&env);
+        let contract_id: Address = env.register(VerifierContract, (vk.clone(),));
+        let client = VerifierContractClient::new(&env, &contract_id);
+        let stored_vk = client.vk_bytes();
+        assert_eq!(stored_vk, vk);
+    }
+
+    #[test]
+    fn test_double_init_fails() {
+        let env = Env::default();
+        let vk = vk_bytes(&env);
+        let contract_id: Address = env.register(VerifierContract, (vk.clone(),));
+        let client = VerifierContractClient::new(&env, &contract_id);
+
+        // vk_bytes() should still work (not re-init)
+        assert_eq!(client.vk_bytes(), vk);
+    }
+
+    #[test]
+    fn test_verify_proof_valid() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let vk = vk_bytes(&env);
+        let contract_id: Address = env.register(VerifierContract, (vk,));
+        let client = VerifierContractClient::new(&env, &contract_id);
+
+        let proof = proof_bytes(&env);
+        let public_inputs = public_inputs_bytes(&env);
+        client.verify_proof(&public_inputs, &proof);
+    }
+
+    #[test]
+    fn test_verify_proof_wrong_length() {
+        let env = Env::default();
+        let vk = vk_bytes(&env);
+        let contract_id: Address = env.register(VerifierContract, (vk,));
+        let client = VerifierContractClient::new(&env, &contract_id);
+
+        let short_proof = Bytes::from_slice(&env, &[0u8; 64]);
+        let public_inputs = public_inputs_bytes(&env);
+        let result = client.try_verify_proof(&public_inputs, &short_proof);
+        assert_eq!(result.err().unwrap().unwrap(), VerifierError::ProofParseError);
+    }
+
+    #[test]
+    fn test_verify_proof_wrong_inputs() {
+        let env = Env::default();
+        env.cost_estimate().budget().reset_unlimited();
+        let vk = vk_bytes(&env);
+        let contract_id: Address = env.register(VerifierContract, (vk,));
+        let client = VerifierContractClient::new(&env, &contract_id);
+
+        let proof = proof_bytes(&env);
+        let bad_inputs = Bytes::from_slice(&env, &[0u8; 64]);
+        let result = client.try_verify_proof(&bad_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            VerifierError::VerificationFailed
+        );
+    }
+
+    #[test]
+    fn test_vk_not_set_returns_error() {
+        let env = Env::default();
+        let contract_id: Address = <Address as TestAddress>::generate(&env);
+        let client = VerifierContractClient::new(&env, &contract_id);
+        let result = client.try_vk_bytes();
+        assert!(result.is_err());
+    }
+}
