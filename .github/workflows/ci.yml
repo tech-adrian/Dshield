@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  contracts:
+    name: Contract Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run contract tests
+        run: cargo test --workspace
+
+      - name: Build contract WASMs
+        run: |
+          cargo install --locked stellar-cli --features opt || true
+          stellar contract build
+
+  circuits:
+    name: Circuit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nargo
+        run: |
+          curl -L https://raw.githubusercontent.com/noir-lang/noirup/refs/heads/main/install | bash
+          export PATH="$HOME/.nargo/bin:$PATH"
+          noirup -v 1.0.0-beta.9
+          nargo --version
+
+      - name: Install Barretenberg
+        run: |
+          curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/refs/heads/master/barretenberg/bbup/install | bash
+          export PATH="$HOME/.bb:$PATH"
+          bbup -v 0.87.0
+          bb --version
+
+      - name: Compile shielded_pool circuit
+        run: |
+          export PATH="$HOME/.nargo/bin:$HOME/.bb:$PATH"
+          cd circuits/shielded_pool && nargo compile
+
+      - name: Compile compliance circuit
+        run: |
+          export PATH="$HOME/.nargo/bin:$HOME/.bb:$PATH"
+          cd circuits/compliance && nargo compile
+
+      - name: Compile hasher circuit
+        run: |
+          export PATH="$HOME/.nargo/bin:$HOME/.bb:$PATH"
+          cd circuits/hasher && nargo compile
+
+      - name: Generate and verify shielded_pool proof
+        run: |
+          export PATH="$HOME/.nargo/bin:$HOME/.bb:$PATH"
+          cd circuits/shielded_pool
+          nargo execute
+          bb write_vk --scheme ultra_honk --oracle_hash keccak \
+            --bytecode_path target/shielded_pool.json \
+            --output_path target --output_format bytes_and_fields
+          bb prove --scheme ultra_honk --oracle_hash keccak \
+            --bytecode_path target/shielded_pool.json \
+            --witness_path target/shielded_pool.gz \
+            --output_path target --output_format bytes_and_fields
+          bb verify -s ultra_honk --oracle_hash keccak \
+            -k target/vk -p target/proof -i target/public_inputs
+
+      - name: Generate and verify compliance proof
+        run: |
+          export PATH="$HOME/.nargo/bin:$HOME/.bb:$PATH"
+          cd circuits/compliance
+          nargo execute
+          bb write_vk --scheme ultra_honk --oracle_hash keccak \
+            --bytecode_path target/compliance.json \
+            --output_path target --output_format bytes_and_fields
+          bb prove --scheme ultra_honk --oracle_hash keccak \
+            --bytecode_path target/compliance.json \
+            --witness_path target/compliance.gz \
+            --output_path target --output_format bytes_and_fields
+          bb verify -s ultra_honk --oracle_hash keccak \
+            -k target/vk -p target/proof -i target/public_inputs
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Nargo (for hasher circuit)
+        run: |
+          curl -L https://raw.githubusercontent.com/noir-lang/noirup/refs/heads/main/install | bash
+          export PATH="$HOME/.nargo/bin:$PATH"
+          noirup -v 1.0.0-beta.9
+
+      - name: Compile hasher circuit
+        run: |
+          export PATH="$HOME/.nargo/bin:$PATH"
+          cd circuits/hasher && nargo compile
+          cp target/hasher.json ../../frontend/src/circuits/
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install
+
+      - name: Lint
+        working-directory: frontend
+        run: pnpm lint
+
+      - name: Unit tests
+        working-directory: frontend
+        run: pnpm test
+
+      - name: Type check & build
+        working-directory: frontend
+        run: pnpm build
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [contracts, circuits, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --features opt || true
+
+      - name: Install Nargo
+        run: |
+          curl -L https://raw.githubusercontent.com/noir-lang/noirup/refs/heads/main/install | bash
+          export PATH="$HOME/.nargo/bin:$PATH"
+          noirup -v 1.0.0-beta.9
+
+      - name: Install Barretenberg
+        run: |
+          curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/refs/heads/master/barretenberg/bbup/install | bash
+          export PATH="$HOME/.bb:$PATH"
+          bbup -v 0.87.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-e2e-
+
+      - name: Run E2E tests
+        run: |
+          export PATH="$HOME/.nargo/bin:$HOME/.bb:$PATH"
+          ./tests/e2e.sh
