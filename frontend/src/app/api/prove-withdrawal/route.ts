@@ -15,11 +15,12 @@ export async function POST(req: NextRequest) {
       secret,
       root,
       nullifierHash,
+      recipientHash,
       pathSiblings,
       pathBits,
     } = body;
 
-    if (!nullifier || !secret || !root || !nullifierHash) {
+    if (!nullifier || !secret || !root || !nullifierHash || !recipientHash) {
       return NextResponse.json(
         { error: "Missing required fields" },
         { status: 400 },
@@ -50,6 +51,7 @@ export async function POST(req: NextRequest) {
 secret = "${ensureHex(secret)}"
 root = "${ensureHex(root)}"
 nullifier_hash = "${ensureHex(nullifierHash)}"
+recipient = "${ensureHex(recipientHash)}"
 path_bits = [${bitsToml}]
 path_siblings = [
 ${siblingsToml},

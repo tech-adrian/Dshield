@@ -12,8 +12,11 @@ import { getActiveNotes, markNoteSpent, type ShieldedNote } from "@/lib/notes";
 import { getAllCommitments } from "@/lib/deposits";
 import {
   computeNullifierHash,
+  computeRecipientHash,
   buildMerkleTree,
 } from "@/lib/poseidon2";
+import { syncDepositsFromChain } from "@/lib/indexer";
+import { proveWithdrawal } from "@/lib/prover";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 type WithdrawStep =
@@ -41,12 +44,14 @@ export default function WithdrawPage() {
   const [step, setStep] = useState<WithdrawStep>("idle");
   const [isLoading, setIsLoading] = useState(false);
   const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
+  const [recipient, setRecipient] = useState("");
 
   const activeNotes = typeof window !== "undefined" ? getActiveNotes() : [];
 
   async function handleAutomatedWithdraw() {
     if (!address || !selectedNote) return;
-    if (!POOL_CONTRACT_ID) {
+    const poolId = selectedNote.poolId || POOL_CONTRACT_ID;
+    if (!poolId) {
       setStatus("Error: Pool contract ID not configured.");
       return;
     }
@@ -60,7 +65,7 @@ export default function WithdrawPage() {
       const nullifierHashClean = nullifierHash.replace(/^0x/, "");
 
       const isUsed = await queryContract(
-        POOL_CONTRACT_ID,
+        poolId,
         "is_nullifier_used",
         [
           StellarSdk.xdr.ScVal.scvBytes(
@@ -76,7 +81,7 @@ export default function WithdrawPage() {
       }
 
       setStep("building_tree");
-      const rootVal = await queryContract(POOL_CONTRACT_ID, "get_root");
+      const rootVal = await queryContract(poolId, "get_root");
       if (!rootVal) {
         setStep("idle");
         setStatus("Error: No Merkle root found. Has any deposit been made?");
@@ -86,55 +91,71 @@ export default function WithdrawPage() {
       const rootBytes = StellarSdk.scValToNative(rootVal) as Buffer;
       const onChainRoot = "0x" + Buffer.from(rootBytes).toString("hex");
 
-      const commitments = getAllCommitments();
+      let commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
       if (commitments.length === 0) {
-        setStep("idle");
-        setStatus(
-          "Error: No deposit history found locally. Cannot reconstruct Merkle tree. " +
-          "Make sure you deposited from this browser.",
-        );
-        setIsLoading(false);
-        return;
+        setStatus("No local deposits found. Syncing from chain...");
+        await syncDepositsFromChain(poolId);
+        commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
+        if (commitments.length === 0) {
+          setStep("idle");
+          setStatus("Error: No deposits found on-chain or locally.");
+          setIsLoading(false);
+          return;
+        }
       }
 
-      const merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
+      let merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
 
       if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
-        setStep("idle");
-        setStatus(
-          "Error: Local Merkle root doesn't match on-chain root. " +
-          "This can happen if deposits were made from another browser. " +
-          `Local: ${merkle.root.slice(0, 18)}... On-chain: ${onChainRoot.slice(0, 18)}...`,
-        );
-        setIsLoading(false);
-        return;
+        setStatus("Root mismatch detected. Syncing deposits from chain...");
+        const synced = await syncDepositsFromChain(poolId);
+        if (synced > 0) {
+          commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
+          merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
+        }
+
+        if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
+          setStep("idle");
+          setStatus(
+            "Error: Merkle root mismatch after sync. " +
+            `Local: ${merkle.root.slice(0, 18)}... On-chain: ${onChainRoot.slice(0, 18)}...`,
+          );
+          setIsLoading(false);
+          return;
+        }
       }
 
       setStep("generating_proof");
-      const proofResponse = await fetch("/api/prove-withdrawal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const recipientAddr = recipient || address;
+      const recipientHash = await computeRecipientHash(recipientAddr!);
+
+      let proof: string;
+      let publicInputs: string;
+      try {
+        const result = await proveWithdrawal({
           nullifier: selectedNote.nullifier,
           secret: selectedNote.secret,
           root: onChainRoot,
           nullifierHash: nullifierHash,
+          recipientHash,
           pathSiblings: merkle.pathSiblings,
           pathBits: merkle.pathBits,
-        }),
-      });
-
-      if (!proofResponse.ok) {
-        const errorBody = await proofResponse.json();
+        });
+        proof = result.proof;
+        publicInputs = result.publicInputs;
+      } catch (proveErr) {
         setStep("idle");
-        setStatus(`Error: ${errorBody.error || "Proof generation failed"}`);
+        const msg =
+          proveErr instanceof Error ? proveErr.message : String(proveErr);
+        setStatus(`Error generating proof: ${msg}`);
         setIsLoading(false);
         return;
       }
 
-      const { proof, publicInputs } = await proofResponse.json();
-
       setStep("signing");
+      const recipientScVal = StellarSdk.nativeToScVal(recipientAddr, {
+        type: "address",
+      });
       const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
         Buffer.from(publicInputs, "hex"),
       );
@@ -143,9 +164,9 @@ export default function WithdrawPage() {
       );
 
       const tx = await buildContractCall(
-        POOL_CONTRACT_ID,
+        poolId,
         "withdraw",
-        [publicInputsScVal, proofScVal],
+        [recipientScVal, publicInputsScVal, proofScVal],
         address,
       );
 
@@ -258,6 +279,23 @@ export default function WithdrawPage() {
                   </span>
                 </div>
               </div>
+            </div>
+
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+              <h3 className="mb-3 text-sm font-medium text-zinc-400">
+                Recipient Address
+              </h3>
+              <input
+                type="text"
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value.trim())}
+                placeholder={address || "G..."}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 p-3 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
+              />
+              <p className="mt-2 text-xs text-zinc-600">
+                Leave empty to withdraw to your connected wallet. Use a
+                different address for unlinkable withdrawals.
+              </p>
             </div>
 
             <button

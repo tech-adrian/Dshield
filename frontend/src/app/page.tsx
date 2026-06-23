@@ -24,8 +24,8 @@ export default function Home() {
           <span className="text-zinc-500">Compliant by Choice.</span>
         </h1>
         <p className="mt-4 max-w-lg text-lg text-zinc-400">
-          DShield is a shielded stablecoin wallet on Stellar. Send and receive
-          USDC privately using Zero-Knowledge Proofs.
+          DShield is a shielded stablecoin wallet on Stellar. Deposit and
+          withdraw USDC privately using Zero-Knowledge Proofs.
         </p>
       </div>
 

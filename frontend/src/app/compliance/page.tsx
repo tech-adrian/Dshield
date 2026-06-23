@@ -18,6 +18,8 @@ import {
   buildMerkleTree,
 } from "@/lib/poseidon2";
 import { generateRandomField } from "@/lib/notes";
+import { syncDepositsFromChain } from "@/lib/indexer";
+import { proveCompliance } from "@/lib/prover";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 type ComplianceStep =
@@ -155,7 +157,8 @@ export default function CompliancePage() {
         return;
       }
 
-      const rootVal = await queryContract(POOL_CONTRACT_ID, "get_root");
+      const compliancePoolId = selectedNote.poolId || POOL_CONTRACT_ID;
+      const rootVal = await queryContract(compliancePoolId, "get_root");
       if (!rootVal) {
         setStep("idle");
         setStatus("Error: No Merkle root found. Has any deposit been made?");
@@ -165,32 +168,46 @@ export default function CompliancePage() {
       const rootBytes = StellarSdk.scValToNative(rootVal) as Buffer;
       const onChainRoot = "0x" + Buffer.from(rootBytes).toString("hex");
 
-      const commitments = getAllCommitments();
+      let commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
       if (commitments.length === 0) {
-        setStep("idle");
-        setStatus("Error: No deposit history found locally.");
-        setIsLoading(false);
-        return;
+        setStatus("No local deposits found. Syncing from chain...");
+        await syncDepositsFromChain(compliancePoolId);
+        commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
+        if (commitments.length === 0) {
+          setStep("idle");
+          setStatus("Error: No deposits found on-chain or locally.");
+          setIsLoading(false);
+          return;
+        }
       }
 
-      const merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
+      let merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
 
       if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
-        setStep("idle");
-        setStatus(
-          "Error: Local Merkle root doesn't match on-chain root. " +
-            `Local: ${merkle.root.slice(0, 18)}... On-chain: ${onChainRoot.slice(0, 18)}...`,
-        );
-        setIsLoading(false);
-        return;
+        setStatus("Root mismatch detected. Syncing deposits from chain...");
+        const synced = await syncDepositsFromChain(compliancePoolId);
+        if (synced > 0) {
+          commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
+          merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
+        }
+
+        if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
+          setStep("idle");
+          setStatus(
+            "Error: Merkle root mismatch after sync. " +
+              `Local: ${merkle.root.slice(0, 18)}... On-chain: ${onChainRoot.slice(0, 18)}...`,
+          );
+          setIsLoading(false);
+          return;
+        }
       }
 
       setStep("generating_proof");
 
-      const proofResponse = await fetch("/api/prove-compliance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      let proof: string;
+      let publicInputs: string;
+      try {
+        const result = await proveCompliance({
           kycPreimage: kyc.preimage,
           nullifier: selectedNote.nullifier,
           secret: selectedNote.secret,
@@ -201,18 +218,17 @@ export default function CompliancePage() {
           disclosedAmount,
           pathSiblings: merkle.pathSiblings,
           pathBits: merkle.pathBits,
-        }),
-      });
-
-      if (!proofResponse.ok) {
-        const errorBody = await proofResponse.json();
+        });
+        proof = result.proof;
+        publicInputs = result.publicInputs;
+      } catch (proveErr) {
         setStep("idle");
-        setStatus(`Error: ${errorBody.error || "Proof generation failed"}`);
+        const msg =
+          proveErr instanceof Error ? proveErr.message : String(proveErr);
+        setStatus(`Error generating proof: ${msg}`);
         setIsLoading(false);
         return;
       }
-
-      const { proof, publicInputs } = await proofResponse.json();
 
       setStep("signing");
       const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
