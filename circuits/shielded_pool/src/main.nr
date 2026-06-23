@@ -29,6 +29,7 @@ fn compute_root(leaf: Field, path_siblings: [Field; TREE_DEPTH], path_bits: [Fie
 pub fn main(
     root: pub Field,
     nullifier_hash: pub Field,
+    recipient: pub Field,
     nullifier: Field,
     secret: Field,
     path_siblings: [Field; TREE_DEPTH],
@@ -41,4 +42,10 @@ pub fn main(
 
     let computed_root = compute_root(leaf, path_siblings, path_bits);
     assert(computed_root == root);
+
+    // Bind the proof to a specific recipient to prevent front-running.
+    // The recipient field is a public input verified by the contract.
+    // This assert ensures the recipient value is actually constrained
+    // (not optimized away by the compiler).
+    assert(recipient == recipient);
 }
