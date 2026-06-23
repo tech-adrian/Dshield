@@ -9,6 +9,7 @@ import {
   ensureUsdcTrustline,
   hasUsdcTrustline,
   getUsdcSacId,
+  relayWithdrawal,
   POOL_CONTRACT_ID,
 } from "@/lib/stellar";
 import { getActiveNotes, markNoteSpent, type ShieldedNote } from "@/lib/notes";
@@ -193,33 +194,51 @@ export default function WithdrawPage() {
         return;
       }
 
-      setStep("signing");
-      const recipientScVal = StellarSdk.nativeToScVal(recipientAddr, {
-        type: "address",
-      });
-      const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(publicInputs, "hex"),
-      );
-      const proofScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(proof, "hex"),
-      );
-
-      const tx = await buildContractCall(
-        poolId,
-        "withdraw",
-        [recipientScVal, publicInputsScVal, proofScVal],
-        address,
-      );
-
-      const signedXdr = await signTransaction(tx.toXDR());
-
       setStep("submitting");
-      const txHash = await submitTransaction(signedXdr);
+
+      // Prefer the relayer so the withdrawal is unlinkable — the user's own
+      // account never appears on-chain. The recipient binding (enforced by the
+      // contract) means the relayer can't redirect the funds. If no relayer is
+      // configured, fall back to a wallet-signed submission.
+      let txHash: string;
+      let viaRelayer = false;
+      const relayed = await relayWithdrawal({
+        poolId,
+        recipient: recipientAddr!,
+        publicInputs,
+        proof,
+      });
+      if (relayed) {
+        txHash = relayed.hash;
+        viaRelayer = true;
+      } else {
+        setStep("signing");
+        const recipientScVal = StellarSdk.nativeToScVal(recipientAddr, {
+          type: "address",
+        });
+        const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
+          Buffer.from(publicInputs, "hex"),
+        );
+        const proofScVal = StellarSdk.xdr.ScVal.scvBytes(
+          Buffer.from(proof, "hex"),
+        );
+        const tx = await buildContractCall(
+          poolId,
+          "withdraw",
+          [recipientScVal, publicInputsScVal, proofScVal],
+          address,
+        );
+        const signedXdr = await signTransaction(tx.toXDR());
+        setStep("submitting");
+        txHash = await submitTransaction(signedXdr);
+      }
 
       markNoteSpent(selectedNote.commitment);
       setSelectedNote(null);
       setStep("done");
-      setStatus(`Withdrawal successful! TX: ${txHash.slice(0, 12)}...`);
+      setStatus(
+        `Withdrawal successful${viaRelayer ? " (relayed — unlinkable)" : ""}! TX: ${txHash.slice(0, 12)}...`,
+      );
     } catch (err) {
       setStep("idle");
       let errorMessage = "Unknown error";

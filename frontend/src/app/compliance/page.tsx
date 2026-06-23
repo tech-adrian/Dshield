@@ -18,7 +18,10 @@ import {
   buildMerkleTree,
 } from "@/lib/poseidon2";
 import { generateRandomField } from "@/lib/notes";
-import { syncDepositsFromChain } from "@/lib/indexer";
+import {
+  syncDepositsFromChain,
+  fetchCommitmentsFromChain,
+} from "@/lib/indexer";
 import { proveCompliance } from "@/lib/prover";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
@@ -168,11 +171,18 @@ export default function CompliancePage() {
       const rootBytes = StellarSdk.scValToNative(rootVal) as Buffer;
       const onChainRoot = "0x" + Buffer.from(rootBytes).toString("hex");
 
-      let commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
-      if (commitments.length === 0) {
-        setStatus("No local deposits found. Syncing from chain...");
+      // Rebuild the tree from the authoritative on-chain commitment list
+      // (get_commitments) — the same retention-independent path the withdraw
+      // flow uses. Fall back to event scan + local cache only for older pools
+      // that predate the get_commitments view.
+      const poolKey = selectedNote.poolId || POOL_CONTRACT_ID;
+      const chainCommitments = await fetchCommitmentsFromChain(compliancePoolId);
+      let commitments: string[];
+      if (chainCommitments && chainCommitments.length > 0) {
+        commitments = chainCommitments;
+      } else {
         await syncDepositsFromChain(compliancePoolId);
-        commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
+        commitments = getAllCommitments(poolKey);
         if (commitments.length === 0) {
           setStep("idle");
           setStatus("Error: No deposits found on-chain or locally.");
@@ -181,25 +191,16 @@ export default function CompliancePage() {
         }
       }
 
-      let merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
+      const merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
 
       if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
-        setStatus("Root mismatch detected. Syncing deposits from chain...");
-        const synced = await syncDepositsFromChain(compliancePoolId);
-        if (synced > 0) {
-          commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
-          merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
-        }
-
-        if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
-          setStep("idle");
-          setStatus(
-            "Error: Merkle root mismatch after sync. " +
-              `Local: ${merkle.root.slice(0, 18)}... On-chain: ${onChainRoot.slice(0, 18)}...`,
-          );
-          setIsLoading(false);
-          return;
-        }
+        setStep("idle");
+        setStatus(
+          `Error: Merkle root mismatch (${commitments.length} leaves). ` +
+            "If this pool predates the get_commitments upgrade, redeploy and re-deposit.",
+        );
+        setIsLoading(false);
+        return;
       }
 
       setStep("generating_proof");
