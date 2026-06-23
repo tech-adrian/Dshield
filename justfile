@@ -88,17 +88,44 @@ deploy: build
     echo "Verifier deployed: $VERIFIER_ID"
     echo "$VERIFIER_ID" > .verifier_id
 
-    echo "Deploying pool contract..."
-    POOL_ID=$(stellar contract deploy \
-        --wasm target/wasm32v1-none/release/dshield_pool.wasm \
-        --source alice \
-        --network local \
-        -- \
-        --verifier "$VERIFIER_ID")
-    echo "Pool deployed: $POOL_ID"
-    echo "$POOL_ID" > .pool_id
+    ALICE_ADDR=$(stellar keys address alice)
 
-    ADMIN_ADDR=$(stellar keys address alice)
+    echo "Deploying USDC test token..."
+    TOKEN_ID=$(stellar contract asset deploy \
+        --asset "USDC:$ALICE_ADDR" \
+        --source alice \
+        --network local 2>&1 | tail -1)
+    echo "USDC token: $TOKEN_ID"
+    echo "$TOKEN_ID" > .token_id
+
+    echo "Minting USDC to deployer..."
+    stellar contract invoke --id "$TOKEN_ID" --source alice --network local --send=yes \
+        -- mint --to "$ALICE_ADDR" --amount 10000000000000 > /dev/null 2>&1
+    echo "Deployer funded with 1,000,000 USDC"
+
+    echo "Deploying pool tiers (10, 100, 1000 USDC)..."
+    POOL_10=$(stellar contract deploy \
+        --wasm target/wasm32v1-none/release/dshield_pool.wasm \
+        --source alice --network local \
+        -- --verifier "$VERIFIER_ID" --token "$TOKEN_ID" --deposit_amount 100000000)
+    echo "Pool 10 USDC: $POOL_10"
+
+    POOL_100=$(stellar contract deploy \
+        --wasm target/wasm32v1-none/release/dshield_pool.wasm \
+        --source alice --network local \
+        -- --verifier "$VERIFIER_ID" --token "$TOKEN_ID" --deposit_amount 1000000000)
+    echo "Pool 100 USDC: $POOL_100"
+
+    POOL_1000=$(stellar contract deploy \
+        --wasm target/wasm32v1-none/release/dshield_pool.wasm \
+        --source alice --network local \
+        -- --verifier "$VERIFIER_ID" --token "$TOKEN_ID" --deposit_amount 10000000000)
+    echo "Pool 1000 USDC: $POOL_1000"
+
+    echo "$POOL_10" > .pool_id
+    echo "POOL_TIERS=10 USDC:$POOL_10:100000000,100 USDC:$POOL_100:1000000000,1000 USDC:$POOL_1000:10000000000"
+
+    ADMIN_ADDR=$ALICE_ADDR
 
     echo "Deploying compliance contract..."
     COMPLIANCE_ID=$(stellar contract deploy \

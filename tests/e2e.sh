@@ -93,6 +93,16 @@ section "Building contracts"
 stellar contract build 2>&1
 ok "Contracts built"
 
+# ─── Deploy token ───
+section "Deploying token"
+
+TOKEN_ID=$(stellar contract asset deploy \
+  --asset native \
+  --source e2e-test --network local 2>&1 | tail -1)
+ok "Native XLM SAC token: ${TOKEN_ID:0:12}..."
+
+DEPOSIT_AMOUNT=10000000  # 1 XLM in stroops
+
 # ─── Deploy contracts ───
 section "Deploying contracts"
 
@@ -105,7 +115,7 @@ ok "Verifier deployed: ${VERIFIER_ID:0:12}..."
 POOL_ID=$(stellar contract deploy \
   --wasm target/wasm32v1-none/release/dshield_pool.wasm \
   --source e2e-test --network local \
-  -- --verifier "$VERIFIER_ID")
+  -- --verifier "$VERIFIER_ID" --token "$TOKEN_ID" --deposit_amount "$DEPOSIT_AMOUNT")
 ok "Pool deployed: ${POOL_ID:0:12}..."
 
 COMPLIANCE_ID=$(stellar contract deploy \
@@ -120,12 +130,15 @@ section "Contract state tests"
 IDX=$(stellar contract invoke --id "$POOL_ID" --source e2e-test --network local -- get_next_index 2>&1 | tail -1)
 [[ "$IDX" == "0" ]] && ok "get_next_index == 0" || err "get_next_index" "expected 0, got $IDX"
 
+DEP_AMT=$(stellar contract invoke --id "$POOL_ID" --source e2e-test --network local -- get_deposit_amount 2>&1 | tail -1)
+[[ "$DEP_AMT" == "$DEPOSIT_AMOUNT" ]] && ok "get_deposit_amount == $DEPOSIT_AMOUNT" || err "get_deposit_amount" "expected $DEPOSIT_AMOUNT, got $DEP_AMT"
+
 # ─── Test: deposit ───
 section "Deposit test"
 
 COMMITMENT=$(printf '%064d' 12345)
 DEPOSIT_RESULT=$(stellar contract invoke --id "$POOL_ID" --source e2e-test --network local --send=yes \
-  -- deposit --commitment "$COMMITMENT" 2>&1 | tail -1)
+  -- deposit --depositor "$E2E_ADDR" --commitment "$COMMITMENT" 2>&1 | tail -1)
 [[ "$DEPOSIT_RESULT" == "0" ]] && ok "Deposit returned index 0" || err "Deposit" "expected 0, got $DEPOSIT_RESULT"
 
 IDX=$(stellar contract invoke --id "$POOL_ID" --source e2e-test --network local -- get_next_index 2>&1 | tail -1)
@@ -138,7 +151,7 @@ ROOT=$(stellar contract invoke --id "$POOL_ID" --source e2e-test --network local
 section "Duplicate deposit test"
 
 DUP_RESULT=$(stellar contract invoke --id "$POOL_ID" --source e2e-test --network local --send=yes \
-  -- deposit --commitment "$COMMITMENT" 2>&1 || true)
+  -- deposit --depositor "$E2E_ADDR" --commitment "$COMMITMENT" 2>&1 || true)
 echo "$DUP_RESULT" | grep -qi "error\|fail\|CommitmentExists" && ok "Duplicate deposit rejected" || err "Duplicate deposit" "should have failed"
 
 # ─── Test: nullifier not used ───
@@ -170,13 +183,14 @@ IS_REG2=$(stellar contract invoke --id "$COMPLIANCE_ID" --source e2e-test --netw
 section "ZK proof generation test"
 
 # Use known test values: nullifier=1234, secret=5678
-# These match the default Prover.toml
+# Circuit now has 3 public inputs: root, nullifier_hash, recipient
 cd circuits/shielded_pool
 cat > Prover.toml << 'TOML'
 nullifier = "1234"
 secret = "5678"
 root = "0x0e829a70d5bfbb7c4ffe0be28454f1eefd47e898dfd330b0a4c61fc615453ed2"
 nullifier_hash = "0x2b0c9e50ac135931c5f87dff253337d63f6fe5f8b0f2489b92a5a9446cc4b3d2"
+recipient = "42"
 path_bits = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 path_siblings = [
     "0x00",
