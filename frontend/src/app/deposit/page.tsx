@@ -7,6 +7,9 @@ import {
   submitTransaction,
   queryContract,
   getPoolTiers,
+  ensureUsdcTrustline,
+  faucetUsdc,
+  getUsdcSacId,
   type PoolTier,
 } from "@/lib/stellar";
 import { saveNote, generateRandomField } from "@/lib/notes";
@@ -60,6 +63,28 @@ export default function DepositPage() {
     const total = totalNotes;
 
     try {
+      // Make sure the connected wallet can actually hold and pay USDC:
+      // establish the trustline (wallet signs) and faucet test funds if short.
+      // Both are no-ops once satisfied.
+      const sac = getUsdcSacId();
+      if (sac) {
+        setStatus("Checking USDC trustline...");
+        await ensureUsdcTrustline(address, signTransaction);
+
+        const needed = selectedTier.amount * total;
+        const balVal = await queryContract(sac, "balance", [
+          StellarSdk.nativeToScVal(address, { type: "address" }),
+        ]);
+        const balance = balVal
+          ? BigInt(StellarSdk.scValToNative(balVal) as string | number)
+          : BigInt(0);
+        if (balance < BigInt(needed)) {
+          setStatus("Funding wallet with test USDC...");
+          // Mint a generous buffer so subsequent deposits don't re-faucet.
+          await faucetUsdc(address, BigInt(needed) * BigInt(2) - balance);
+        }
+      }
+
       for (let n = 0; n < total; n++) {
         setStatus(
           total > 1

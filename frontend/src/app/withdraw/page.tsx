@@ -6,16 +6,22 @@ import {
   buildContractCall,
   submitTransaction,
   queryContract,
+  ensureUsdcTrustline,
+  hasUsdcTrustline,
+  getUsdcSacId,
   POOL_CONTRACT_ID,
 } from "@/lib/stellar";
 import { getActiveNotes, markNoteSpent, type ShieldedNote } from "@/lib/notes";
-import { getAllCommitments } from "@/lib/deposits";
+import { getAllCommitments, clearDeposits } from "@/lib/deposits";
 import {
   computeNullifierHash,
   computeRecipientHash,
   buildMerkleTree,
 } from "@/lib/poseidon2";
-import { syncDepositsFromChain } from "@/lib/indexer";
+import {
+  syncDepositsFromChain,
+  fetchCommitmentsFromChain,
+} from "@/lib/indexer";
 import { proveWithdrawal } from "@/lib/prover";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
@@ -91,34 +97,70 @@ export default function WithdrawPage() {
       const rootBytes = StellarSdk.scValToNative(rootVal) as Buffer;
       const onChainRoot = "0x" + Buffer.from(rootBytes).toString("hex");
 
-      let commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
-      if (commitments.length === 0) {
-        setStatus("No local deposits found. Syncing from chain...");
+      // Rebuild the tree from the AUTHORITATIVE on-chain commitment list
+      // (the contract's get_commitments view). This always returns every leaf
+      // in canonical order and does not depend on RPC event retention or local
+      // storage, so a tree built from it is guaranteed to match get_root.
+      const poolKey = selectedNote.poolId || POOL_CONTRACT_ID;
+      setStatus("Fetching commitments from chain...");
+      const chainCommitments = await fetchCommitmentsFromChain(poolId);
+
+      let commitments: string[];
+      if (chainCommitments && chainCommitments.length > 0) {
+        // Authoritative path. Keep local storage in sync for other views, but
+        // do NOT mix it into the tree.
+        commitments = chainCommitments;
+      } else {
+        // The pool predates the get_commitments view. Fall back to event scan
+        // + local cache, which may be incomplete on networks with short event
+        // retention.
         await syncDepositsFromChain(poolId);
-        commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
+        commitments = getAllCommitments(poolKey);
         if (commitments.length === 0) {
           setStep("idle");
-          setStatus("Error: No deposits found on-chain or locally.");
+          setStatus(
+            "Error: This pool does not expose get_commitments and no deposits " +
+              "could be recovered from events. Redeploy the pool (just deploy) " +
+              "and re-deposit.",
+          );
           setIsLoading(false);
           return;
         }
       }
 
-      let merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
+      const merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
 
       if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
-        setStatus("Root mismatch detected. Syncing deposits from chain...");
-        const synced = await syncDepositsFromChain(poolId);
-        if (synced > 0) {
-          commitments = getAllCommitments(selectedNote.poolId || POOL_CONTRACT_ID);
-          merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
-        }
+        setStep("idle");
+        const usedChain = chainCommitments && chainCommitments.length > 0;
+        const detail = usedChain
+          ? "Rebuilt from the on-chain commitment list but roots still differ — " +
+            "this should not happen; please report it."
+          : "Rebuilt from event scan / local cache, which is incomplete on this " +
+            "RPC. Redeploy the pool (just deploy) so it exposes get_commitments, " +
+            "then re-deposit.";
+        setStatus(
+          `Error: Merkle root mismatch (${commitments.length} leaves). ${detail}`,
+        );
+        setIsLoading(false);
+        return;
+      }
 
-        if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
+      const recipientAddr = recipient || address;
+
+      // The recipient must be able to receive USDC. For your own wallet we
+      // establish the trustline automatically; an external recipient must
+      // already have one (we can't sign on their behalf). Check before the
+      // expensive proof so we fail fast.
+      if (getUsdcSacId()) {
+        if (recipientAddr === address) {
+          setStatus("Ensuring recipient USDC trustline...");
+          await ensureUsdcTrustline(address, signTransaction);
+        } else if (!(await hasUsdcTrustline(recipientAddr!))) {
           setStep("idle");
           setStatus(
-            "Error: Merkle root mismatch after sync. " +
-            `Local: ${merkle.root.slice(0, 18)}... On-chain: ${onChainRoot.slice(0, 18)}...`,
+            `Error: Recipient ${recipientAddr!.slice(0, 8)}… has no USDC trustline. ` +
+              "Withdraw to your own address, or have the recipient add a USDC trustline first.",
           );
           setIsLoading(false);
           return;
@@ -126,7 +168,6 @@ export default function WithdrawPage() {
       }
 
       setStep("generating_proof");
-      const recipientAddr = recipient || address;
       const recipientHash = await computeRecipientHash(recipientAddr!);
 
       let proof: string;
@@ -191,6 +232,31 @@ export default function WithdrawPage() {
       }
       console.error("Withdrawal error:", err);
       setStatus(`Error: ${errorMessage}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function handleClearCacheAndResync() {
+    const poolId = selectedNote?.poolId || POOL_CONTRACT_ID;
+    if (!poolId) {
+      setStatus("Error: Pool contract ID not configured.");
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      // Drop this pool's cached deposit records (e.g. stale entries from a
+      // previous deployment) and rebuild the set from on-chain events.
+      const removed = clearDeposits(poolId);
+      setStatus("Cache cleared. Re-syncing deposits from chain...");
+      const synced = await syncDepositsFromChain(poolId);
+      setStatus(
+        `Done: removed ${removed} cached record(s), re-synced ${synced} deposit(s) from chain. Try the withdrawal again.`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStatus(`Error clearing cache: ${msg}`);
     } finally {
       setIsLoading(false);
     }
@@ -305,6 +371,18 @@ export default function WithdrawPage() {
             >
               {isLoading ? "Processing..." : "Generate Proof & Withdraw"}
             </button>
+
+            <button
+              onClick={handleClearCacheAndResync}
+              disabled={isLoading}
+              className="w-full rounded-lg border border-zinc-700 py-2.5 text-xs font-medium text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-300 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Clear deposit cache &amp; re-sync from chain
+            </button>
+            <p className="text-xs text-zinc-600">
+              Use this if you hit a Merkle root mismatch — it discards stale
+              local deposit records and rebuilds the set from on-chain events.
+            </p>
           </>
         )}
 
