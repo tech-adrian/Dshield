@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useWallet } from "@/components/WalletProvider";
 import {
   buildContractCall,
@@ -14,7 +14,6 @@ import { getAllCommitments } from "@/lib/deposits";
 import { getKyc, saveKyc, type KycRecord } from "@/lib/kyc";
 import {
   poseidon2Hash,
-  computeNullifierHash,
   buildMerkleTree,
 } from "@/lib/poseidon2";
 import { generateRandomField } from "@/lib/notes";
@@ -53,16 +52,12 @@ export default function CompliancePage() {
   const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
   const [auditorKey, setAuditorKey] = useState("");
   const [disclosedAmount, setDisclosedAmount] = useState("");
-  const [kyc, setKyc] = useState<KycRecord | null>(null);
+  const [kyc, setKyc] = useState<KycRecord | null>(() => getKyc());
 
   const allNotes =
     typeof window !== "undefined"
       ? getNotes().filter((n) => !n.spent)
       : [];
-
-  useEffect(() => {
-    setKyc(getKyc());
-  }, []);
 
   async function handleSetupKyc() {
     if (!address || !COMPLIANCE_CONTRACT_ID) return;
