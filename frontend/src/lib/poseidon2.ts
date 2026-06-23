@@ -107,6 +107,17 @@ export async function buildMerkleTree(
   };
 }
 
+export async function computeRecipientHash(
+  stellarAddress: string,
+): Promise<string> {
+  const StellarSdk = await import("@stellar/stellar-sdk");
+  const keypair = StellarSdk.Keypair.fromPublicKey(stellarAddress);
+  const rawKey = keypair.rawPublicKey();
+  const lo = "0x00" + Buffer.from(rawKey.slice(0, 15)).toString("hex");
+  const hi = "0x00" + Buffer.from(rawKey.slice(15)).toString("hex");
+  return poseidon2Hash(lo, hi);
+}
+
 function ensureHex(v: string): string {
   if (v.startsWith("0x")) return v;
   return "0x" + v;

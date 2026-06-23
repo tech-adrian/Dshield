@@ -6,6 +6,7 @@ export interface ShieldedNote {
   amount: string;
   spent: boolean;
   createdAt: number;
+  poolId?: string;
 }
 
 const STORAGE_KEY = "dshield_notes";

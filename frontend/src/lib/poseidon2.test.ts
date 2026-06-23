@@ -114,4 +114,21 @@ describe("buildMerkleTree", () => {
     const proof2 = await buildMerkleTree([c2], 0);
     expect(proof1.root).not.toBe(proof2.root);
   });
+
+  it("2-leaf tree has different root than 1-leaf tree", async () => {
+    const c0 = await computeCommitment("001111", "002222");
+    const c1 = await computeCommitment("003333", "004444");
+    const proof1Leaf = await buildMerkleTree([c0], 0);
+    const proof2Leaves = await buildMerkleTree([c0, c1], 0);
+    expect(proof1Leaf.root).not.toBe(proof2Leaves.root);
+    expect(proof2Leaves.pathSiblings).toHaveLength(20);
+    expect(proof2Leaves.pathBits).toHaveLength(20);
+  });
+
+  it("2-leaf tree: sibling at level 0 for index 0 is the other leaf", async () => {
+    const c0 = await computeCommitment("001111", "002222");
+    const c1 = await computeCommitment("003333", "004444");
+    const proof = await buildMerkleTree([c0, c1], 0);
+    expect(proof.pathSiblings[0].toLowerCase()).toBe(c1.toLowerCase());
+  });
 });
