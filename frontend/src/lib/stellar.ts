@@ -8,6 +8,29 @@ const DEV_SECRET_KEY = process.env.NEXT_PUBLIC_DEV_SECRET_KEY || "";
 export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID || "";
 export const COMPLIANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID || "";
 
+export interface PoolTier {
+  id: string;
+  label: string;
+  amount: number;
+}
+
+export function getPoolTiers(): PoolTier[] {
+  const tiers: PoolTier[] = [];
+  const raw = process.env.NEXT_PUBLIC_POOL_TIERS || "";
+  if (raw) {
+    for (const entry of raw.split(",")) {
+      const [label, id, amt] = entry.split(":");
+      if (label && id && amt) {
+        tiers.push({ id, label, amount: Number(amt) });
+      }
+    }
+  }
+  if (tiers.length === 0 && POOL_CONTRACT_ID) {
+    tiers.push({ id: POOL_CONTRACT_ID, label: "10 USDC", amount: 100000000 });
+  }
+  return tiers;
+}
+
 export function getRpcServer() {
   return new StellarSdk.rpc.Server(RPC_URL, { allowHttp: true });
 }
