@@ -4,6 +4,7 @@ export interface DepositRecord {
   commitment: string;
   leafIndex: number;
   timestamp: number;
+  poolId?: string;
 }
 
 export function saveDeposit(record: DepositRecord): void {
@@ -21,8 +22,10 @@ export function getDeposits(): DepositRecord[] {
   return JSON.parse(raw);
 }
 
-export function getAllCommitments(): string[] {
-  const deposits = getDeposits();
+export function getAllCommitments(poolId?: string): string[] {
+  const deposits = getDeposits().filter(
+    (d) => !poolId || !d.poolId || d.poolId === poolId,
+  );
   const commitments: string[] = [];
   for (const d of deposits) {
     while (commitments.length < d.leafIndex) {

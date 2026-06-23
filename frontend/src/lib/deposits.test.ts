@@ -64,4 +64,15 @@ describe("getAllCommitments", () => {
     expect(commitments[1]).toBe(zeroPadding);
     expect(commitments[2]).toBe("ccc");
   });
+
+  it("fills interior gap when deposits at index 0 and 2 but not 1", () => {
+    saveDeposit(makeDeposit({ commitment: "first", leafIndex: 0 }));
+    saveDeposit(makeDeposit({ commitment: "third", leafIndex: 2 }));
+    const commitments = getAllCommitments();
+    const zeroPadding = "0x" + "00".repeat(32);
+    expect(commitments).toHaveLength(3);
+    expect(commitments[0]).toBe("first");
+    expect(commitments[1]).toBe(zeroPadding);
+    expect(commitments[2]).toBe("third");
+  });
 });
