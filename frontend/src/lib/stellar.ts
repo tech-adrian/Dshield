@@ -13,8 +13,6 @@ export const COMPLIANCE_CONTRACT_ID = process.env.NEXT_PUBLIC_COMPLIANCE_CONTRAC
 // trustline and faucet test USDC so any wallet can use the demo.
 export const USDC_CODE = process.env.NEXT_PUBLIC_USDC_CODE || "USDC";
 export const USDC_ISSUER = process.env.NEXT_PUBLIC_USDC_ISSUER || "";
-// Localnet-only faucet key (throwaway). Used to mint test USDC client-side.
-const USDC_ISSUER_SECRET = process.env.NEXT_PUBLIC_USDC_ISSUER_SECRET || "";
 
 export function getUsdcAsset(): StellarSdk.Asset | null {
   if (!USDC_ISSUER) return null;
@@ -69,27 +67,24 @@ export async function ensureUsdcTrustline(
 }
 
 /**
- * Mint test USDC to `address` using the localnet issuer key. Requires the
- * recipient to already have a trustline. No-op if no issuer secret is set.
+ * Mint test USDC to `address` via the server-side faucet route. The issuer
+ * secret lives only on the server (see /api/faucet), so it is never exposed to
+ * the browser. Requires the recipient to already have a USDC trustline.
  */
 export async function faucetUsdc(
   address: string,
   amount: bigint | number,
 ): Promise<void> {
-  const sac = getUsdcSacId();
-  if (!sac || !USDC_ISSUER_SECRET) return;
-  const issuer = StellarSdk.Keypair.fromSecret(USDC_ISSUER_SECRET);
-  const tx = await buildContractCall(
-    sac,
-    "mint",
-    [
-      StellarSdk.nativeToScVal(address, { type: "address" }),
-      StellarSdk.nativeToScVal(BigInt(amount), { type: "i128" }),
-    ],
-    issuer.publicKey(),
-  );
-  tx.sign(issuer);
-  await submitTransaction(tx.toXDR());
+  if (!getUsdcSacId()) return;
+  const res = await fetch("/api/faucet", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address, amount: BigInt(amount).toString() }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error || `Faucet request failed (${res.status})`);
+  }
 }
 
 export interface PoolTier {
@@ -159,6 +154,40 @@ export async function buildContractCall(
     throw new Error(`Simulation failed: ${simulated.error}`);
   }
   return StellarSdk.rpc.assembleTransaction(tx, simulated).build();
+}
+
+export interface RelayResult {
+  hash: string;
+  relayer: string;
+}
+
+/**
+ * Submit a withdrawal through the server-side relayer so the user's account
+ * never appears on-chain (unlinkable withdrawal). Returns the relay result, or
+ * `null` if no relayer is configured (HTTP 503) so the caller can fall back to
+ * a wallet-signed submission.
+ */
+export async function relayWithdrawal(params: {
+  poolId: string;
+  recipient: string;
+  publicInputs: string;
+  proof: string;
+}): Promise<RelayResult | null> {
+  const res = await fetch("/api/relay-withdraw", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (res.status === 503) return null; // relayer not configured
+  const body = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    hash?: string;
+    relayer?: string;
+  };
+  if (!res.ok) {
+    throw new Error(body.error || `Relayed withdrawal failed (${res.status})`);
+  }
+  return { hash: body.hash!, relayer: body.relayer! };
 }
 
 export async function submitTransaction(signedXdr: string): Promise<string> {
