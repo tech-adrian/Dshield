@@ -19,7 +19,11 @@ async function generateProof(
 
   try {
     const { witness } = await noir.execute(inputs as never);
-    const proof = await backend.generateProof(witness);
+    // The verification key and on-chain verifier are built with
+    // `--oracle_hash keccak` (see tests/e2e.sh). The proof MUST be generated
+    // with the matching keccak Fiat-Shamir transform, otherwise the on-chain
+    // UltraHonk verifier rejects it (Contract #4 / VerificationFailed).
+    const proof = await backend.generateProof(witness, { keccak: true });
 
     const proofHex = Buffer.from(proof.proof).toString("hex");
     const publicInputsHex = proof.publicInputs
