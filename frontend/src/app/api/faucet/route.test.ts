@@ -1,0 +1,36 @@
+import { describe, it, expect, vi } from "vitest";
+
+const VALID_G = "GABZWK2YLPOGBEOZT6VOCID6ROSSZGPSLAEPCTWIBGAJDHISO6DFKYYZ";
+
+// The route reads USDC_ISSUER_SECRET at module load, so reload per scenario.
+async function loadRoute(secret?: string) {
+  vi.resetModules();
+  if (secret === undefined) delete process.env.USDC_ISSUER_SECRET;
+  else process.env.USDC_ISSUER_SECRET = secret;
+  process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE = "Standalone Network ; February 2017";
+  process.env.NEXT_PUBLIC_USDC_CODE = "USDC";
+  return (await import("./route")).POST;
+}
+
+// Minimal NextRequest stand-in — the handler only calls req.json().
+const req = (body: unknown) => ({ json: async () => body }) as never;
+
+describe("/api/faucet validation", () => {
+  it("503 when the issuer secret is not configured", async () => {
+    const POST = await loadRoute(undefined);
+    const res = await POST(req({ address: VALID_G, amount: "1" }));
+    expect(res.status).toBe(503);
+  });
+
+  it("400 on an invalid recipient address", async () => {
+    const POST = await loadRoute("Sxxx-dummy-secret");
+    const res = await POST(req({ address: "not-an-address", amount: "1" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("400 on a non-positive amount", async () => {
+    const POST = await loadRoute("Sxxx-dummy-secret");
+    const res = await POST(req({ address: VALID_G, amount: "0" }));
+    expect(res.status).toBe(400);
+  });
+});
