@@ -8,6 +8,8 @@ circuits/*/target/
 # Stellar
 .verifier_id
 .pool_id
+.compliance_id
+.token_id
 .soroban/
 
 # Node
