@@ -58,6 +58,17 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       ],
     });
 
+    // In dev-key mode the app always acts as the configured account. Ignore any
+    // stale saved wallet (e.g. a previously connected Freighter address that has
+    // no USDC trustline) so deposits use the funded dev account.
+    const devKeypair = getDevKeypair();
+    if (devKeypair) {
+      const addr = devKeypair.publicKey();
+      setAddress(addr);
+      localStorage.setItem("dshield_wallet", addr);
+      return;
+    }
+
     const saved = localStorage.getItem("dshield_wallet");
     if (saved) setAddress(saved);
   }, []);
