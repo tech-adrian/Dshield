@@ -43,9 +43,10 @@ pub fn main(
     let computed_root = compute_root(leaf, path_siblings, path_bits);
     assert(computed_root == root);
 
-    // Bind the proof to a specific recipient to prevent front-running.
-    // The recipient field is a public input verified by the contract.
-    // This assert ensures the recipient value is actually constrained
-    // (not optimized away by the compiler).
+    // `recipient` is a committed public input. The front-running protection is
+    // enforced on-chain: the pool contract recomputes the recipient hash from
+    // the actual payout address and rejects the withdrawal unless it equals
+    // this value (see recipient_hash_from_address). This assert simply keeps
+    // the public input from being optimized away by the compiler.
     assert(recipient == recipient);
 }
