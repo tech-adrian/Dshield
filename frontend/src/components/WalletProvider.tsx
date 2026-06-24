@@ -4,7 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -39,22 +39,25 @@ export function useWallet() {
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const initialized = useRef(false);
-  const [address, setAddress] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
+  const [address, setAddress] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useLayoutEffect(() => {
+    if (initialized.current) return;
+    initialized.current = true;
+
     const devKeypair = getDevKeypair();
     if (devKeypair) {
       const addr = devKeypair.publicKey();
       localStorage.setItem("dshield_wallet", addr);
-      return addr;
+      setAddress(addr);
+    } else {
+      const saved = localStorage.getItem("dshield_wallet");
+      if (saved) {
+        setAddress(saved);
+      }
     }
-    const saved = localStorage.getItem("dshield_wallet");
-    return saved || null;
-  });
-  const [isConnecting, setIsConnecting] = useState(false);
-
-  useEffect(() => {
-    if (initialized.current) return;
-    initialized.current = true;
 
     StellarWalletsKit.init({
       network: Networks.STANDALONE,
@@ -68,6 +71,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       ],
     });
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const connect = useCallback(async () => {
     setIsConnecting(true);
