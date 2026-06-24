@@ -60,14 +60,23 @@ stellar keys rm e2e-test 2>/dev/null || true
 stellar keys generate e2e-test --network local
 E2E_ADDR=$(stellar keys address e2e-test)
 
-for i in 1 2 3 4 5; do
-  RESULT=$(curl -s "http://localhost:8000/friendbot?addr=$E2E_ADDR" 2>&1)
-  if echo "$RESULT" | grep -q '"successful": true'; then
+# Source of truth: the account exists on-chain (Horizon returns 200) once
+# friendbot has funded it. RPC health can be ready before friendbot/Horizon
+# is, and friendbot's JSON shape varies, so poll account existence directly.
+account_exists() {
+  [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8000/accounts/$1")" == "200" ]]
+}
+
+FUNDED=0
+for i in $(seq 1 20); do
+  curl -s "http://localhost:8000/friendbot?addr=$E2E_ADDR" >/dev/null 2>&1 || true
+  if account_exists "$E2E_ADDR"; then
+    FUNDED=1
     break
   fi
-  sleep 5
+  sleep 3
 done
-echo "$RESULT" | grep -q '"successful": true' && ok "Account funded: ${E2E_ADDR:0:10}..." || err "Funding" "friendbot failed"
+[[ "$FUNDED" == "1" ]] && ok "Account funded: ${E2E_ADDR:0:10}..." || err "Funding" "friendbot failed"
 
 # ─── Build circuits ───
 section "Building circuits"
