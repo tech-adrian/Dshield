@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="frontend/public/dshield.png" alt="DShield Logo" width="200" />
+</p>
+
 # DShield
 
 > **Private by Default. Compliant by Choice.**
