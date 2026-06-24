@@ -11,6 +11,21 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies
+        run: cargo audit
+
   contracts:
     name: Contract Tests
     runs-on: ubuntu-latest
@@ -156,6 +171,10 @@ jobs:
       - name: Install dependencies
         working-directory: frontend
         run: pnpm install
+
+      - name: Audit dependencies
+        working-directory: frontend
+        run: pnpm audit --prod || true
 
       - name: Lint
         working-directory: frontend
