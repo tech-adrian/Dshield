@@ -21,8 +21,23 @@ import {
   syncDepositsFromChain,
   fetchCommitmentsFromChain,
 } from "@/lib/indexer";
-import { proveCompliance } from "@/lib/prover";
+import { proveCompliance, proveDisclosure } from "@/lib/prover";
 import * as StellarSdk from "@stellar/stellar-sdk";
+
+const TOKEN_DECIMALS = 7;
+const TOKEN_SYMBOL = "USDC";
+
+function stroopsToUsdc(stroops: string): string {
+  const n = Number(stroops);
+  if (!n) return "0";
+  return (n / 10 ** TOKEN_DECIMALS).toString();
+}
+
+function usdcToStroops(usdc: string): string {
+  const n = parseFloat(usdc);
+  if (isNaN(n)) return "0";
+  return Math.round(n * 10 ** TOKEN_DECIMALS).toString();
+}
 
 type ComplianceStep =
   | "idle"
@@ -52,6 +67,8 @@ export default function CompliancePage() {
   const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
   const [auditorKey, setAuditorKey] = useState("");
   const [disclosedAmount, setDisclosedAmount] = useState("");
+  const [disclosureMode, setDisclosureMode] = useState<"exact" | "threshold">("exact");
+  const [threshold, setThreshold] = useState("");
   const [kyc, setKyc] = useState<KycRecord | null>(() => getKyc());
 
   const allNotes =
@@ -74,19 +91,15 @@ export default function CompliancePage() {
       );
       const kycHashClean = kycHash.replace(/^0x/, "");
 
-      const kycHashScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(kycHashClean, "hex"),
-      );
-
-      const tx = await buildContractCall(
-        COMPLIANCE_CONTRACT_ID,
-        "register_kyc",
-        [kycHashScVal],
-        address,
-      );
-
-      const signedXdr = await signTransaction(tx.toXDR());
-      const txHash = await submitTransaction(signedXdr);
+      const res = await fetch("/api/register-kyc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kycHash: kycHashClean }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        throw new Error(body.error || `KYC registration failed (${res.status})`);
+      }
 
       const record: KycRecord = {
         preimage,
@@ -98,7 +111,7 @@ export default function CompliancePage() {
       setKyc(record);
 
       setStep("idle");
-      setStatus(`KYC registered! TX: ${txHash.slice(0, 12)}...`);
+      setStatus(`KYC registered! TX: ${body.hash.slice(0, 12)}...`);
     } catch (err) {
       setStep("idle");
       const msg = err instanceof Error ? err.message : JSON.stringify(err);
@@ -119,18 +132,41 @@ export default function CompliancePage() {
       setStatus("Error: Enter an auditor key.");
       return;
     }
-    if (!disclosedAmount) {
-      setStatus("Error: Enter the amount to disclose.");
-      return;
-    }
 
     const noteAmount = selectedNote.amount || "0";
-    if (disclosedAmount !== noteAmount) {
-      setStatus(
-        `Error: Disclosed amount must match the note's amount (${noteAmount}). ` +
-          "The circuit enforces amount == disclosed_amount.",
-      );
-      return;
+    const noteUsdc = stroopsToUsdc(noteAmount);
+
+    if (disclosureMode === "exact") {
+      if (!disclosedAmount) {
+        setStatus("Error: Enter the amount to disclose.");
+        return;
+      }
+      const disclosedStroops = usdcToStroops(disclosedAmount);
+      if (disclosedStroops !== noteAmount) {
+        setStatus(
+          `Error: Disclosed amount must match the note's amount (${noteUsdc} ${TOKEN_SYMBOL}). ` +
+            "The circuit enforces amount == disclosed_amount.",
+        );
+        return;
+      }
+    } else {
+      if (!threshold) {
+        setStatus("Error: Enter a threshold amount.");
+        return;
+      }
+      const thresholdVal = parseFloat(threshold);
+      const amountVal = parseFloat(noteUsdc);
+      if (isNaN(thresholdVal) || thresholdVal <= 0) {
+        setStatus("Error: Threshold must be a positive number.");
+        return;
+      }
+      if (thresholdVal > amountVal) {
+        setStatus(
+          `Error: Threshold (${threshold} ${TOKEN_SYMBOL}) exceeds note balance (${noteUsdc} ${TOKEN_SYMBOL}). ` +
+            "The proof would fail.",
+        );
+        return;
+      }
     }
 
     setIsLoading(true);
@@ -203,20 +239,37 @@ export default function CompliancePage() {
       let proof: string;
       let publicInputs: string;
       try {
-        const result = await proveCompliance({
-          kycPreimage: kyc.preimage,
-          nullifier: selectedNote.nullifier,
-          secret: selectedNote.secret,
-          amount: noteAmount,
-          auditorKey,
-          merkleRoot: onChainRoot,
-          kycHash: "0x" + kyc.hash,
-          disclosedAmount,
-          pathSiblings: merkle.pathSiblings,
-          pathBits: merkle.pathBits,
-        });
-        proof = result.proof;
-        publicInputs = result.publicInputs;
+        if (disclosureMode === "exact") {
+          const result = await proveCompliance({
+            kycPreimage: kyc.preimage,
+            nullifier: selectedNote.nullifier,
+            secret: selectedNote.secret,
+            amount: noteAmount,
+            auditorKey,
+            merkleRoot: onChainRoot,
+            kycHash: "0x" + kyc.hash,
+            disclosedAmount: usdcToStroops(disclosedAmount),
+            pathSiblings: merkle.pathSiblings,
+            pathBits: merkle.pathBits,
+          });
+          proof = result.proof;
+          publicInputs = result.publicInputs;
+        } else {
+          const result = await proveDisclosure({
+            kycPreimage: kyc.preimage,
+            nullifier: selectedNote.nullifier,
+            secret: selectedNote.secret,
+            amount: noteAmount,
+            auditorKey,
+            merkleRoot: onChainRoot,
+            kycHash: "0x" + kyc.hash,
+            threshold: usdcToStroops(threshold),
+            pathSiblings: merkle.pathSiblings,
+            pathBits: merkle.pathBits,
+          });
+          proof = result.proof;
+          publicInputs = result.publicInputs;
+        }
       } catch (proveErr) {
         setStep("idle");
         const msg =
@@ -225,6 +278,9 @@ export default function CompliancePage() {
         setIsLoading(false);
         return;
       }
+
+      const contractMethod =
+        disclosureMode === "exact" ? "verify_compliance" : "verify_disclosure";
 
       setStep("signing");
       const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
@@ -236,7 +292,7 @@ export default function CompliancePage() {
 
       const tx = await buildContractCall(
         COMPLIANCE_CONTRACT_ID,
-        "verify_compliance",
+        contractMethod,
         [publicInputsScVal, proofScVal],
         address,
       );
@@ -247,7 +303,13 @@ export default function CompliancePage() {
       const txHash = await submitTransaction(signedXdr);
 
       setStep("done");
-      setStatus(`Compliance verified! TX: ${txHash.slice(0, 12)}...`);
+      if (disclosureMode === "exact") {
+        setStatus(`Compliance verified! TX: ${txHash.slice(0, 12)}...`);
+      } else {
+        setStatus(
+          `Disclosure verified! Proved balance >= ${threshold} ${TOKEN_SYMBOL} to auditor. TX: ${txHash.slice(0, 12)}...`,
+        );
+      }
     } catch (err) {
       setStep("idle");
       const msg = err instanceof Error ? err.message : JSON.stringify(err);
@@ -330,7 +392,7 @@ export default function CompliancePage() {
                   onClick={() => {
                     if (!isLoading) {
                       setSelectedNote(note);
-                      setDisclosedAmount(note.amount || "0");
+                      setDisclosedAmount(stroopsToUsdc(note.amount || "0"));
                     }
                   }}
                   disabled={isLoading}
@@ -345,7 +407,7 @@ export default function CompliancePage() {
                     {note.commitment.slice(-16)}
                   </div>
                   <div className="mt-1 flex justify-between text-xs text-zinc-500">
-                    <span>Amount: {note.amount || "N/A"}</span>
+                    <span>{stroopsToUsdc(note.amount || "0")} {TOKEN_SYMBOL}</span>
                     <span>Leaf #{note.leafIndex}</span>
                   </div>
                 </button>
@@ -361,6 +423,45 @@ export default function CompliancePage() {
               Step 3: Disclosure Details
             </h3>
             <div className="space-y-4">
+              {/* Mode toggle */}
+              <div>
+                <label className="mb-2 block text-xs text-zinc-500">
+                  Disclosure Mode
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDisclosureMode("exact")}
+                    disabled={isLoading}
+                    className={`rounded-lg border p-3 text-center text-sm font-medium transition-colors ${
+                      disclosureMode === "exact"
+                        ? "border-white bg-zinc-800 text-white"
+                        : "border-zinc-700 text-zinc-400 hover:border-zinc-500"
+                    } disabled:opacity-50`}
+                  >
+                    Exact Amount
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDisclosureMode("threshold")}
+                    disabled={isLoading}
+                    className={`rounded-lg border p-3 text-center text-sm font-medium transition-colors ${
+                      disclosureMode === "threshold"
+                        ? "border-indigo-500 bg-indigo-950/30 text-indigo-300"
+                        : "border-zinc-700 text-zinc-400 hover:border-zinc-500"
+                    } disabled:opacity-50`}
+                  >
+                    Balance Threshold
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-zinc-600">
+                  {disclosureMode === "exact"
+                    ? "Reveal the exact amount to the auditor."
+                    : "Prove your balance meets a minimum without revealing the exact amount."}
+                </p>
+              </div>
+
+              {/* Auditor key */}
               <div>
                 <label className="mb-1 block text-xs text-zinc-500">
                   Auditor Key (field element)
@@ -377,22 +478,49 @@ export default function CompliancePage() {
                   specific auditor.
                 </p>
               </div>
-              <div>
-                <label className="mb-1 block text-xs text-zinc-500">
-                  Disclosed Amount
-                </label>
-                <input
-                  type="text"
-                  value={disclosedAmount}
-                  onChange={(e) => setDisclosedAmount(e.target.value.trim())}
-                  placeholder="1000000"
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-800 p-3 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
-                />
-                <p className="mt-1 text-xs text-zinc-600">
-                  Must match the note&apos;s actual amount ({selectedNote.amount || "N/A"}).
-                  The circuit enforces this equality.
-                </p>
-              </div>
+
+              {/* Exact mode: disclosed amount */}
+              {disclosureMode === "exact" && (
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-500">
+                    Disclosed Amount ({TOKEN_SYMBOL})
+                  </label>
+                  <input
+                    type="number"
+                    value={disclosedAmount}
+                    onChange={(e) => setDisclosedAmount(e.target.value.trim())}
+                    placeholder="10"
+                    step="any"
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-800 p-3 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  />
+                  <p className="mt-1 text-xs text-zinc-600">
+                    Must match the note&apos;s actual amount ({stroopsToUsdc(selectedNote.amount || "0")} {TOKEN_SYMBOL}).
+                    The circuit enforces this equality.
+                  </p>
+                </div>
+              )}
+
+              {/* Threshold mode: minimum balance */}
+              {disclosureMode === "threshold" && (
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-500">
+                    Minimum Balance ({TOKEN_SYMBOL})
+                  </label>
+                  <input
+                    type="number"
+                    value={threshold}
+                    onChange={(e) => setThreshold(e.target.value.trim())}
+                    placeholder={`e.g. ${Number(stroopsToUsdc(selectedNote.amount || "0")) / 2}`}
+                    step="any"
+                    className="w-full rounded-lg border border-indigo-800/50 bg-zinc-800 p-3 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:border-indigo-500 focus:outline-none"
+                  />
+                  <p className="mt-1 text-xs text-zinc-600">
+                    Prove your balance is at least this amount. The auditor
+                    learns the threshold was met but not your exact balance.
+                    Note balance: {stroopsToUsdc(selectedNote.amount || "0")} {TOKEN_SYMBOL}.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -401,10 +529,22 @@ export default function CompliancePage() {
         {selectedNote && kyc?.registeredOnChain && (
           <button
             onClick={handleVerifyCompliance}
-            disabled={isLoading || !auditorKey || !disclosedAmount}
-            className="w-full rounded-lg bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={
+              isLoading ||
+              !auditorKey ||
+              (disclosureMode === "exact" ? !disclosedAmount : !threshold)
+            }
+            className={`w-full rounded-lg py-3 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              disclosureMode === "threshold"
+                ? "bg-indigo-600 text-white hover:bg-indigo-500"
+                : "bg-white text-black hover:bg-zinc-200"
+            }`}
           >
-            {isLoading ? "Processing..." : "Generate Proof & Verify Compliance"}
+            {isLoading
+              ? "Processing..."
+              : disclosureMode === "exact"
+                ? "Generate Proof & Verify Compliance"
+                : "Generate Threshold Proof & Verify"}
           </button>
         )}
 
