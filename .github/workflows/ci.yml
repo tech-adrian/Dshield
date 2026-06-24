@@ -105,6 +105,26 @@ jobs:
           bb verify -s ultra_honk --oracle_hash keccak \
             -k target/vk -p target/proof -i target/public_inputs
 
+      - name: Compile disclosure circuit
+        run: |
+          export PATH="$HOME/.nargo/bin:$HOME/.bb:$PATH"
+          cd circuits/disclosure && nargo compile
+
+      - name: Generate and verify disclosure proof
+        run: |
+          export PATH="$HOME/.nargo/bin:$HOME/.bb:$PATH"
+          cd circuits/disclosure
+          nargo execute
+          bb write_vk --scheme ultra_honk --oracle_hash keccak \
+            --bytecode_path target/disclosure.json \
+            --output_path target --output_format bytes_and_fields
+          bb prove --scheme ultra_honk --oracle_hash keccak \
+            --bytecode_path target/disclosure.json \
+            --witness_path target/disclosure.gz \
+            --output_path target --output_format bytes_and_fields
+          bb verify -s ultra_honk --oracle_hash keccak \
+            -k target/vk -p target/proof -i target/public_inputs
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
