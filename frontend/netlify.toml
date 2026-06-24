@@ -1,0 +1,22 @@
+# Netlify deployment config for the DShield frontend.
+# The Next.js app lives in this `frontend/` subdirectory; set the site's
+# "Base directory" to `frontend` in the Netlify UI (or deploy from here) so
+# these settings and the pnpm lockfile are picked up.
+
+[build]
+  command = "pnpm build"
+  publish = ".next"
+
+# The official Next.js runtime: wires up SSR/serverless functions for the API
+# routes (faucet, register-kyc, relay-withdraw) and image optimization. Required
+# for the App Router server routes to work — a plain static publish would break them.
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+[build.environment]
+  # Match CI (Node 22, pnpm 9). Pin pnpm so the lockfile resolves identically.
+  NODE_VERSION = "22"
+  PNPM_VERSION = "9"
+  # Let pnpm run native dependency build scripts (secp256k1, sharp, etc.) that
+  # the wallet kit and Stellar SDK need; pnpm blocks these by default.
+  PNPM_FLAGS = "--config.confirmModulesPurge=false"
