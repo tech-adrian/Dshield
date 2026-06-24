@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { StellarWalletsKit, Networks } from "@creit.tech/stellar-wallets-kit";
+import { StellarWalletsKit, type Networks } from "@creit.tech/stellar-wallets-kit";
 import { getNetworkPassphrase, getDevKeypair, devSignTransaction } from "@/lib/stellar";
 import { FreighterModule } from "@creit.tech/stellar-wallets-kit/modules/freighter";
 import { xBullModule } from "@creit.tech/stellar-wallets-kit/modules/xbull";
@@ -59,8 +59,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       }
     }
 
+    const passphrase = getNetworkPassphrase();
     StellarWalletsKit.init({
-      network: Networks.STANDALONE,
+      network: passphrase as Networks,
       selectedWalletId: "freighter",
       modules: [
         new FreighterModule(),
