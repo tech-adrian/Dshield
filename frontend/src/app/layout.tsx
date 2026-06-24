@@ -22,6 +22,8 @@ export const metadata: Metadata = {
     "Private by Default. Compliant by Choice. A shielded USDC wallet on Stellar using Zero-Knowledge Proofs.",
   icons: {
     icon: "/favicon.ico",
+    shortcut: "/favicon.ico",
+    apple: "/icon.png",
   },
   openGraph: {
     title: "DShield - Shielded Stablecoin Wallet",

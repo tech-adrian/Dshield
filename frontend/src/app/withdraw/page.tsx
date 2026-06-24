@@ -24,6 +24,14 @@ import {
   fetchCommitmentsFromChain,
 } from "@/lib/indexer";
 import { proveWithdrawal } from "@/lib/prover";
+import { truncateMiddle } from "@/lib/format";
+import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
+import { Card } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
+import { SelectButton } from "@/components/ui/SelectButton";
+import { StatusMessage } from "@/components/ui/StatusMessage";
+import { ProgressSteps } from "@/components/ui/ProgressSteps";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 type WithdrawStep =
@@ -44,6 +52,14 @@ const STEP_LABELS: Record<WithdrawStep, string> = {
   submitting: "Submitting transaction...",
   done: "Withdrawal complete!",
 };
+
+const PROGRESS_STEPS = [
+  "checking_nullifier",
+  "building_tree",
+  "generating_proof",
+  "signing",
+  "submitting",
+] as const;
 
 export default function WithdrawPage() {
   const { address, signTransaction } = useWallet();
@@ -283,25 +299,19 @@ export default function WithdrawPage() {
 
   if (!address) {
     return (
-      <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
-        <h1 className="text-2xl font-bold">Withdraw</h1>
-        <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
-          <p className="text-zinc-400">Connect your wallet to withdraw.</p>
-        </div>
-      </div>
+      <ConnectGate title="Withdraw" prompt="Connect your wallet to withdraw." />
     );
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
-      <h1 className="text-2xl font-bold">Withdraw from Shielded Pool</h1>
-      <p className="mt-2 text-sm text-zinc-400">
-        Prove you own a note in the Merkle tree without revealing which one.
-        The ZK proof is generated automatically.
-      </p>
+    <PageShell>
+      <PageHeader
+        title="Withdraw from Shielded Pool"
+        description="Prove you own a note in the Merkle tree without revealing which one. The ZK proof is generated automatically."
+      />
 
       <div className="mt-8 space-y-6">
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <Card>
           <h3 className="text-sm font-medium text-zinc-400">
             Select a Note ({activeNotes.length} available)
           </h3>
@@ -312,19 +322,15 @@ export default function WithdrawPage() {
           ) : (
             <div className="mt-3 space-y-2">
               {activeNotes.map((note) => (
-                <button
+                <SelectButton
                   key={note.commitment}
+                  selected={selectedNote?.commitment === note.commitment}
                   onClick={() => !isLoading && setSelectedNote(note)}
                   disabled={isLoading}
-                  className={`w-full rounded-lg border p-3 text-left text-sm transition-colors ${
-                    selectedNote?.commitment === note.commitment
-                      ? "border-white bg-zinc-800"
-                      : "border-zinc-800 hover:border-zinc-700"
-                  } disabled:opacity-50`}
+                  className="w-full border-zinc-800 text-left hover:border-zinc-700"
                 >
                   <div className="font-mono text-xs text-zinc-300">
-                    {note.commitment.slice(0, 16)}...
-                    {note.commitment.slice(-16)}
+                    {truncateMiddle(note.commitment, 16, 16)}
                   </div>
                   <div className="mt-1 flex justify-between text-xs text-zinc-500">
                     <span>
@@ -332,28 +338,28 @@ export default function WithdrawPage() {
                     </span>
                     <span>Leaf #{note.leafIndex}</span>
                   </div>
-                </button>
+                </SelectButton>
               ))}
             </div>
           )}
-        </div>
+        </Card>
 
         {selectedNote && (
           <>
-            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+            <Card>
               <h3 className="mb-3 text-sm font-medium text-zinc-400">
                 Note Details
               </h3>
-              <div className="space-y-2 text-xs font-mono">
+              <div className="space-y-2 font-mono text-xs">
                 <div>
                   <span className="text-zinc-500">Nullifier: </span>
-                  <span className="text-zinc-300 break-all">
+                  <span className="break-all text-zinc-300">
                     {selectedNote.nullifier}
                   </span>
                 </div>
                 <div>
                   <span className="text-zinc-500">Secret: </span>
-                  <span className="text-zinc-300 break-all">
+                  <span className="break-all text-zinc-300">
                     {selectedNote.secret}
                   </span>
                 </div>
@@ -364,40 +370,40 @@ export default function WithdrawPage() {
                   </span>
                 </div>
               </div>
-            </div>
+            </Card>
 
-            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+            <Card>
               <h3 className="mb-3 text-sm font-medium text-zinc-400">
                 Recipient Address
               </h3>
-              <input
+              <Input
                 type="text"
+                mono
                 value={recipient}
                 onChange={(e) => setRecipient(e.target.value.trim())}
                 placeholder={address || "G..."}
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-800 p-3 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
+                hint="Leave empty to withdraw to your connected wallet. Use a different address for unlinkable withdrawals."
               />
-              <p className="mt-2 text-xs text-zinc-600">
-                Leave empty to withdraw to your connected wallet. Use a
-                different address for unlinkable withdrawals.
-              </p>
-            </div>
+            </Card>
 
-            <button
+            <Button
+              fullWidth
+              size="lg"
               onClick={handleAutomatedWithdraw}
               disabled={isLoading}
-              className="w-full rounded-lg bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isLoading ? "Processing..." : "Generate Proof & Withdraw"}
-            </button>
+            </Button>
 
-            <button
+            <Button
+              fullWidth
+              variant="outline"
               onClick={handleClearCacheAndResync}
               disabled={isLoading}
-              className="w-full rounded-lg border border-zinc-700 py-2.5 text-xs font-medium text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-300 disabled:cursor-not-allowed disabled:opacity-50"
+              className="text-xs text-zinc-400"
             >
               Clear deposit cache &amp; re-sync from chain
-            </button>
+            </Button>
             <p className="text-xs text-zinc-600">
               Use this if you hit a Merkle root mismatch — it discards stale
               local deposit records and rebuilds the set from on-chain events.
@@ -406,61 +412,17 @@ export default function WithdrawPage() {
         )}
 
         {step !== "idle" && step !== "done" && (
-          <div className="rounded-lg bg-zinc-800 p-4">
-            <div className="flex items-center gap-3">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-400 border-t-white" />
-              <span className="text-sm text-zinc-300">
-                {STEP_LABELS[step]}
-              </span>
-            </div>
-            <div className="mt-3 flex gap-1">
-              {(
-                [
-                  "checking_nullifier",
-                  "building_tree",
-                  "generating_proof",
-                  "signing",
-                  "submitting",
-                ] as WithdrawStep[]
-              ).map((s, i) => (
-                <div
-                  key={s}
-                  className={`h-1 flex-1 rounded-full ${
-                    stepIndex(step) >= i
-                      ? "bg-white"
-                      : "bg-zinc-700"
-                  }`}
-                />
-              ))}
-            </div>
-          </div>
+          <ProgressSteps
+            label={STEP_LABELS[step]}
+            steps={PROGRESS_STEPS}
+            current={step}
+          />
         )}
 
         {status && (
-          <div
-            className={`rounded-lg p-3 text-sm ${
-              status.startsWith("Error")
-                ? "bg-red-900/30 text-red-400"
-                : status.includes("successful")
-                  ? "bg-green-900/30 text-green-400"
-                  : "bg-zinc-800 text-zinc-300"
-            }`}
-          >
-            {status}
-          </div>
+          <StatusMessage message={status} successHints={["successful"]} />
         )}
       </div>
-    </div>
+    </PageShell>
   );
-}
-
-function stepIndex(s: WithdrawStep): number {
-  const order: WithdrawStep[] = [
-    "checking_nullifier",
-    "building_tree",
-    "generating_proof",
-    "signing",
-    "submitting",
-  ];
-  return order.indexOf(s);
 }

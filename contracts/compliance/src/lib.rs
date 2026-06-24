@@ -20,6 +20,7 @@ pub enum ComplianceError {
     AlreadyInitialized = 6,
     InvalidPublicInputs = 7,
     KycNotRegistered = 8,
+    DisclosureVkNotSet = 9,
 }
 
 #[contractevent(topics = ["kyc_registered"])]
@@ -34,6 +35,13 @@ pub struct ComplianceVerifiedEvent<'a> {
     pub auditor_key: &'a BytesN<32>,
 }
 
+#[contractevent(topics = ["disclosure_verified"])]
+pub struct DisclosureVerifiedEvent<'a> {
+    pub kyc_hash: &'a BytesN<32>,
+    pub auditor_key: &'a BytesN<32>,
+    pub threshold: &'a BytesN<32>,
+}
+
 #[contractimpl]
 impl ComplianceContract {
     fn key_vk() -> Symbol {
@@ -44,6 +52,9 @@ impl ComplianceContract {
     }
     fn key_kyc_prefix() -> Symbol {
         symbol_short!("kyc")
+    }
+    fn key_disclosure_vk() -> Symbol {
+        symbol_short!("dvk")
     }
 
     pub fn __constructor(env: Env, vk_bytes: Bytes, admin: Address) -> Result<(), ComplianceError> {
@@ -131,6 +142,83 @@ impl ComplianceContract {
         ComplianceVerifiedEvent {
             kyc_hash: &kyc_hash,
             auditor_key: &auditor_key,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn set_disclosure_vk(env: Env, vk_bytes: Bytes) -> Result<(), ComplianceError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&Self::key_admin())
+            .ok_or(ComplianceError::VkNotSet)?;
+        admin.require_auth();
+
+        let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|e| match e {
+            VkLoadError::WrongLength => ComplianceError::VkInvalidLength,
+            VkLoadError::InvalidParameters => ComplianceError::VkInvalidParameters,
+        })?;
+        env.storage()
+            .instance()
+            .set(&Self::key_disclosure_vk(), &vk_bytes);
+        Ok(())
+    }
+
+    pub fn verify_disclosure(
+        env: Env,
+        public_inputs: Bytes,
+        proof_bytes: Bytes,
+    ) -> Result<(), ComplianceError> {
+        if proof_bytes.len() as usize != PROOF_BYTES {
+            return Err(ComplianceError::ProofParseError);
+        }
+
+        // Public inputs: [merkle_root(32), kyc_hash(32), threshold(32), auditor_key(32)]
+        if public_inputs.len() != 128 {
+            return Err(ComplianceError::InvalidPublicInputs);
+        }
+
+        let mut buf = [0u8; 128];
+        public_inputs.copy_into_slice(&mut buf);
+
+        let mut kyc_arr = [0u8; 32];
+        kyc_arr.copy_from_slice(&buf[32..64]);
+        let kyc_hash = BytesN::from_array(&env, &kyc_arr);
+
+        let kyc_key = (Self::key_kyc_prefix(), kyc_hash.clone());
+        if !env.storage().instance().has(&kyc_key) {
+            return Err(ComplianceError::KycNotRegistered);
+        }
+
+        let mut threshold_arr = [0u8; 32];
+        threshold_arr.copy_from_slice(&buf[64..96]);
+        let threshold = BytesN::from_array(&env, &threshold_arr);
+
+        let mut auditor_arr = [0u8; 32];
+        auditor_arr.copy_from_slice(&buf[96..128]);
+        let auditor_key = BytesN::from_array(&env, &auditor_arr);
+
+        let vk_bytes: Bytes = env
+            .storage()
+            .instance()
+            .get(&Self::key_disclosure_vk())
+            .ok_or(ComplianceError::DisclosureVkNotSet)?;
+
+        let verifier = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|e| match e {
+            VkLoadError::WrongLength => ComplianceError::VkInvalidLength,
+            VkLoadError::InvalidParameters => ComplianceError::VkInvalidParameters,
+        })?;
+
+        verifier
+            .verify(&env, &proof_bytes, &public_inputs)
+            .map_err(|_| ComplianceError::VerificationFailed)?;
+
+        DisclosureVerifiedEvent {
+            kyc_hash: &kyc_hash,
+            auditor_key: &auditor_key,
+            threshold: &threshold,
         }
         .publish(&env);
 
@@ -560,6 +648,158 @@ mod tests {
         let short_proof = Bytes::from_slice(&env, &[0u8; 100]);
 
         let result = client.try_verify_compliance(&short_pi, &short_proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            ComplianceError::ProofParseError
+        );
+    }
+
+    // ──────────────────────────────────────────────
+    //  Disclosure VK management
+    // ──────────────────────────────────────────────
+
+    fn disclosure_vk_bytes(env: &Env) -> Bytes {
+        Bytes::from_slice(
+            env,
+            include_bytes!("../../../circuits/disclosure/target/vk"),
+        )
+    }
+
+    #[test]
+    fn test_set_disclosure_vk_stores_vk() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        client.set_disclosure_vk(&disclosure_vk_bytes(&env));
+
+        assert!(env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .has(&ComplianceContract::key_disclosure_vk())
+        }));
+    }
+
+    #[test]
+    fn test_set_disclosure_vk_requires_admin() {
+        let env = Env::default();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let result = client.try_set_disclosure_vk(&disclosure_vk_bytes(&env));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_disclosure_vk_invalid_length() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let short_vk = Bytes::from_slice(&env, &[0u8; 32]);
+        let result = client.try_set_disclosure_vk(&short_vk);
+        assert!(result.is_err());
+    }
+
+    // ──────────────────────────────────────────────
+    //  Disclosure Verification
+    // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_verify_disclosure_vk_not_set() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let kyc_hash = dummy_hash(&env, 1);
+        client.register_kyc(&kyc_hash);
+
+        let mut pi = [0u8; 128];
+        pi[32] = 1;
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_verify_disclosure(&public_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            ComplianceError::DisclosureVkNotSet
+        );
+    }
+
+    #[test]
+    fn test_verify_disclosure_bad_public_inputs_length() {
+        let env = Env::default();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let bad_inputs = Bytes::from_slice(&env, &[0u8; 64]);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_verify_disclosure(&bad_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            ComplianceError::InvalidPublicInputs
+        );
+    }
+
+    #[test]
+    fn test_verify_disclosure_kyc_not_registered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        client.set_disclosure_vk(&disclosure_vk_bytes(&env));
+
+        let mut pi = [0u8; 128];
+        pi[32] = 0xAB;
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let proof = Bytes::from_slice(&env, &[0u8; PROOF_BYTES]);
+
+        let result = client.try_verify_disclosure(&public_inputs, &proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            ComplianceError::KycNotRegistered
+        );
+    }
+
+    #[test]
+    fn test_verify_disclosure_wrong_proof_length() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        client.set_disclosure_vk(&disclosure_vk_bytes(&env));
+
+        let kyc_hash = dummy_hash(&env, 0xAB);
+        client.register_kyc(&kyc_hash);
+
+        let mut pi = [0u8; 128];
+        pi[32] = 0xAB;
+        let public_inputs = Bytes::from_slice(&env, &pi);
+        let bad_proof = Bytes::from_slice(&env, &[0u8; 100]);
+
+        let result = client.try_verify_disclosure(&public_inputs, &bad_proof);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            ComplianceError::ProofParseError
+        );
+    }
+
+    #[test]
+    fn test_verify_disclosure_proof_checked_before_kyc() {
+        let env = Env::default();
+        let (contract_id, _admin) = setup(&env);
+        let client = ComplianceContractClient::new(&env, &contract_id);
+
+        let pi = Bytes::from_slice(&env, &[0u8; 128]);
+        let short_proof = Bytes::from_slice(&env, &[0u8; 100]);
+
+        let result = client.try_verify_disclosure(&pi, &short_proof);
         assert_eq!(
             result.err().unwrap().unwrap(),
             ComplianceError::ProofParseError

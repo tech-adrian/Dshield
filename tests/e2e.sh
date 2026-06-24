@@ -18,12 +18,12 @@ fail=0
 
 ok() {
   echo -e "  ${GREEN}PASS${NC} $1"
-  ((pass++))
+  pass=$((pass + 1))
 }
 
 err() {
   echo -e "  ${RED}FAIL${NC} $1: $2"
-  ((fail++))
+  fail=$((fail + 1))
 }
 
 section() {
@@ -60,14 +60,32 @@ stellar keys rm e2e-test 2>/dev/null || true
 stellar keys generate e2e-test --network local
 E2E_ADDR=$(stellar keys address e2e-test)
 
-for i in 1 2 3 4 5; do
-  RESULT=$(curl -s "http://localhost:8000/friendbot?addr=$E2E_ADDR" 2>&1)
-  if echo "$RESULT" | grep -q '"successful": true'; then
+# Fund via friendbot. RPC health can be ready before friendbot is, so retry.
+# Trust friendbot's HTTP status (200 = funded; "already funded" also counts)
+# rather than parsing its JSON body or Horizon, whose availability/shape vary
+# by quickstart image. On failure, surface the last response for debugging.
+FUNDED=0
+CODE=000
+FB_BODY=/tmp/friendbot_resp.json
+for i in $(seq 1 30); do
+  # Preferred: let the CLI fund via the network's configured friendbot.
+  if stellar keys fund e2e-test --network local >/dev/null 2>&1; then
+    FUNDED=1
     break
   fi
-  sleep 5
+  # Fallback: hit friendbot directly and trust its HTTP status.
+  CODE=$(curl -s -o "$FB_BODY" -w '%{http_code}' "http://localhost:8000/friendbot?addr=$E2E_ADDR" || echo 000)
+  if [[ "$CODE" == "200" ]] || grep -qiE 'already.*fund|op_already_exists|already.*exist' "$FB_BODY" 2>/dev/null; then
+    FUNDED=1
+    break
+  fi
+  sleep 3
 done
-echo "$RESULT" | grep -q '"successful": true' && ok "Account funded: ${E2E_ADDR:0:10}..." || err "Funding" "friendbot failed"
+if [[ "$FUNDED" == "1" ]]; then
+  ok "Account funded: ${E2E_ADDR:0:10}..."
+else
+  err "Funding" "friendbot failed (last http=$CODE): $(head -c 300 "$FB_BODY" 2>/dev/null)"
+fi
 
 # ─── Build circuits ───
 section "Building circuits"

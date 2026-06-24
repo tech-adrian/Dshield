@@ -5,6 +5,10 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useWallet } from "./WalletProvider";
+import { Button } from "./ui/Button";
+import { MenuIcon, CloseIcon } from "./icons";
+import { truncateMiddle } from "@/lib/format";
+import { cn } from "@/lib/cn";
 
 const NAV_ITEMS = [
   { href: "/deposit", label: "Deposit" },
@@ -19,117 +23,116 @@ export function Header() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
-    <header className="border-b border-zinc-800 bg-zinc-950">
-      <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-4 sm:px-6">
-        {/* Logo */}
-        <Link
-          href="/"
-          className="flex items-center gap-2 text-lg font-bold text-white sm:text-xl"
-        >
-          <Image src="/dshield.png" alt="DShield" width={32} height={32} />
-          <span className="hidden xs:inline">DShield</span>
-        </Link>
-
-        {/* Desktop nav */}
-        <nav className="hidden md:flex gap-1">
-          {NAV_ITEMS.map(({ href, label }) => (
-            <Link
-              key={href}
-              href={href}
-              className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                pathname === href
-                  ? "bg-zinc-800 text-white"
-                  : "text-zinc-400 hover:text-white hover:bg-zinc-800/50"
-              }`}
-            >
-              {label}
-            </Link>
-          ))}
-        </nav>
-
-        <div className="flex items-center gap-2">
-          {/* Wallet */}
-          {address ? (
-            <div className="flex items-center gap-2">
-              <span className="hidden sm:inline rounded-full bg-zinc-800 px-3 py-1.5 text-xs font-mono text-zinc-300">
-                {address.slice(0, 4)}...{address.slice(-4)}
-              </span>
-              <button
-                onClick={disconnect}
-                className="rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-white transition-colors"
-              >
-                Disconnect
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={connect}
-              disabled={isConnecting}
-              className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-black transition-colors hover:bg-zinc-200 disabled:opacity-50 sm:px-4 sm:py-2 sm:text-sm"
-            >
-              {isConnecting ? "Connecting..." : "Connect Wallet"}
-            </button>
-          )}
-
-          {/* Mobile hamburger */}
-          <button
-            onClick={() => setMobileOpen(!mobileOpen)}
-            className="flex md:hidden items-center justify-center rounded-lg p-2 text-zinc-400 hover:text-white transition-colors"
-            aria-label="Toggle menu"
+    // Floating pill: inset from the page edges (sticky with padding) and fully
+    // rounded, so it reads as an elevated element rather than a full-bleed bar.
+    <header className="sticky top-0 z-50 px-3 pt-3 sm:px-4 sm:pt-4">
+      <div className="mx-auto max-w-5xl rounded-2xl border border-zinc-800/80 bg-zinc-950/70 shadow-lg shadow-black/20 backdrop-blur-xl">
+        <div className="flex h-14 items-center justify-between px-3 sm:px-4">
+          {/* Logo */}
+          <Link
+            href="/"
+            className="flex items-center gap-2 text-lg font-bold text-white"
           >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              className="h-5 w-5"
-            >
-              {mobileOpen ? (
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M6 18 18 6M6 6l12 12"
-                />
-              ) : (
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"
-                />
-              )}
-            </svg>
-          </button>
-        </div>
-      </div>
+            <Image
+              src="/dshield-mark.png"
+              alt="DShield"
+              width={25}
+              height={28}
+              priority
+            />
+            <span className="hidden xs:inline">DShield</span>
+          </Link>
 
-      {/* Mobile nav dropdown */}
-      {mobileOpen && (
-        <nav className="border-t border-zinc-800 px-4 py-3 md:hidden">
-          <div className="flex flex-col gap-1">
+          {/* Desktop nav */}
+          <nav className="hidden gap-1 md:flex">
             {NAV_ITEMS.map(({ href, label }) => (
               <Link
                 key={href}
                 href={href}
-                onClick={() => setMobileOpen(false)}
-                className={`rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                className={cn(
+                  "rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                   pathname === href
                     ? "bg-zinc-800 text-white"
-                    : "text-zinc-400 hover:text-white hover:bg-zinc-800/50"
-                }`}
+                    : "text-zinc-400 hover:bg-zinc-800/50 hover:text-white",
+                )}
               >
                 {label}
               </Link>
             ))}
+          </nav>
+
+          <div className="flex items-center gap-2">
+            {/* Wallet */}
+            {address ? (
+              <div className="flex items-center gap-2">
+                <span className="hidden rounded-full bg-zinc-800 px-3 py-1.5 font-mono text-xs text-zinc-300 sm:inline">
+                  {truncateMiddle(address, 4, 4)}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={disconnect}
+                  className="text-zinc-500"
+                >
+                  Disconnect
+                </Button>
+              </div>
+            ) : (
+              <Button
+                size="sm"
+                onClick={connect}
+                disabled={isConnecting}
+                className="sm:px-4 sm:py-2 sm:text-sm"
+              >
+                {isConnecting ? "Connecting..." : "Connect Wallet"}
+              </Button>
+            )}
+
+            {/* Mobile hamburger */}
+            <button
+              onClick={() => setMobileOpen(!mobileOpen)}
+              className="flex items-center justify-center rounded-lg p-2 text-zinc-400 transition-colors hover:text-white md:hidden"
+              aria-label="Toggle menu"
+            >
+              {mobileOpen ? (
+                <CloseIcon className="h-5 w-5" />
+              ) : (
+                <MenuIcon className="h-5 w-5" />
+              )}
+            </button>
           </div>
-          {address && (
-            <div className="mt-2 border-t border-zinc-800/50 pt-2">
-              <span className="block rounded-lg px-3 py-2 text-xs font-mono text-zinc-500">
-                {address.slice(0, 8)}...{address.slice(-8)}
-              </span>
+        </div>
+
+        {/* Mobile nav dropdown */}
+        {mobileOpen && (
+          <nav className="border-t border-zinc-800 px-3 py-3 md:hidden">
+            <div className="flex flex-col gap-1">
+              {NAV_ITEMS.map(({ href, label }) => (
+                <Link
+                  key={href}
+                  href={href}
+                  onClick={() => setMobileOpen(false)}
+                  className={cn(
+                    "rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
+                    pathname === href
+                      ? "bg-zinc-800 text-white"
+                      : "text-zinc-400 hover:bg-zinc-800/50 hover:text-white",
+                  )}
+                >
+                  {label}
+                </Link>
+              ))}
             </div>
-          )}
-        </nav>
-      )}
+            {address && (
+              <div className="mt-2 border-t border-zinc-800/50 pt-2">
+                <span className="block rounded-lg px-3 py-2 font-mono text-xs text-zinc-500">
+                  {truncateMiddle(address, 8, 8)}
+                </span>
+              </div>
+            )}
+          </nav>
+        )}
+      </div>
     </header>
   );
 }

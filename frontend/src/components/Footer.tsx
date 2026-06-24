@@ -1,3 +1,5 @@
+import Image from "next/image";
+import { truncateMiddle } from "@/lib/format";
 
 const EXPLORER_BASE = "https://stellar.expert/explorer/testnet/contract";
 const CONTRACTS = [
@@ -11,14 +13,31 @@ const CONTRACTS = [
   },
 ];
 
+const LINKS = [
+  { label: "GitHub", href: "https://github.com/tech-adrian/Dshield" },
+  { label: "Stellar", href: "https://stellar.org" },
+  { label: "Noir", href: "https://noir-lang.org" },
+];
+
+const linkClass =
+  "text-xs text-zinc-500 transition-colors hover:text-white";
+
 export function Footer() {
   return (
-    <footer className="border-t border-zinc-800 bg-zinc-950">
-      <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
+    <footer className="mt-12 px-3 pb-3 sm:px-4 sm:pb-4">
+      <div className="mx-auto max-w-5xl rounded-2xl border border-zinc-800/80 bg-zinc-900/40 px-5 py-8 backdrop-blur-sm sm:px-8 sm:py-10">
         <div className="grid gap-6 sm:grid-cols-3 sm:gap-8">
           <div>
-            <h4 className="text-sm font-semibold text-white">DShield</h4>
-            <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
+            <div className="flex items-center gap-2">
+              <Image
+                src="/dshield-mark.png"
+                alt="DShield"
+                width={22}
+                height={24}
+              />
+              <h4 className="text-sm font-semibold text-white">DShield</h4>
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-zinc-500">
               Private by Default. Compliant by Choice.
               <br />A shielded stablecoin wallet built on Stellar using
               Zero-Knowledge Proofs.
@@ -36,11 +55,11 @@ export function Footer() {
                         href={`${EXPLORER_BASE}/${id}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-xs text-zinc-500 hover:text-white transition-colors"
+                        className={linkClass}
                       >
                         {label}&ensp;
                         <span className="font-mono">
-                          {id.slice(0, 4)}...{id.slice(-4)}
+                          {truncateMiddle(id, 4, 4)}
                         </span>
                       </a>
                     </li>
@@ -52,36 +71,18 @@ export function Footer() {
           <div>
             <h4 className="text-sm font-semibold text-white">Links</h4>
             <ul className="mt-2 space-y-1.5">
-              <li>
-                <a
-                  href="https://github.com/tech-adrian/Dshield"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-zinc-500 hover:text-white transition-colors"
-                >
-                  GitHub
-                </a>
-              </li>
-              <li>
-                <a
-                  href="https://stellar.org"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-zinc-500 hover:text-white transition-colors"
-                >
-                  Stellar
-                </a>
-              </li>
-              <li>
-                <a
-                  href="https://noir-lang.org"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-zinc-500 hover:text-white transition-colors"
-                >
-                  Noir
-                </a>
-              </li>
+              {LINKS.map(({ label, href }) => (
+                <li key={href}>
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={linkClass}
+                  >
+                    {label}
+                  </a>
+                </li>
+              ))}
             </ul>
           </div>
         </div>

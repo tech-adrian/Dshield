@@ -40,6 +40,9 @@ build-circuits:
     @echo "Building compliance circuit..."
     cd circuits/compliance && nargo compile
     cd circuits/compliance && bb write_vk --scheme ultra_honk --oracle_hash keccak --bytecode_path target/compliance.json --output_path target --output_format bytes_and_fields
+    @echo "Building disclosure circuit..."
+    cd circuits/disclosure && nargo compile
+    cd circuits/disclosure && bb write_vk --scheme ultra_honk --oracle_hash keccak --bytecode_path target/disclosure.json --output_path target --output_format bytes_and_fields
     @echo "All circuits built."
 
 # Generate a test proof from the shielded_pool circuit
@@ -59,10 +62,21 @@ verify-pool:
     cd circuits/shielded_pool && bb verify -s ultra_honk --oracle_hash keccak -k target/vk -p target/proof -i target/public_inputs
     @echo "Pool proof verified."
 
+# Generate a test proof from the disclosure circuit
+prove-disclosure:
+    cd circuits/disclosure && nargo execute
+    cd circuits/disclosure && bb prove --scheme ultra_honk --oracle_hash keccak --bytecode_path target/disclosure.json --witness_path target/disclosure.gz --output_path target --output_format bytes_and_fields
+    @echo "Disclosure proof generated."
+
 # Verify compliance proof locally (off-chain)
 verify-compliance:
     cd circuits/compliance && bb verify -s ultra_honk --oracle_hash keccak -k target/vk -p target/proof -i target/public_inputs
     @echo "Compliance proof verified."
+
+# Verify disclosure proof locally (off-chain)
+verify-disclosure:
+    cd circuits/disclosure && bb verify -s ultra_honk --oracle_hash keccak -k target/vk -p target/proof -i target/public_inputs
+    @echo "Disclosure proof verified."
 
 # Build Soroban contract WASM binaries
 build-contracts:
@@ -177,20 +191,34 @@ deploy network="local": build
     echo "Compliance deployed: $COMPLIANCE_ID"
     echo "$COMPLIANCE_ID" > .compliance_id
 
+    echo "Setting disclosure VK on compliance contract..."
+    stellar contract invoke --id "$COMPLIANCE_ID" --source alice --network "$NETWORK" --send=yes \
+        -- set_disclosure_vk --vk_bytes-file-path circuits/disclosure/target/vk >/dev/null
+    echo "Disclosure VK set."
+
     echo "Writing frontend/.env.local..."
     # Use alice as the dev wallet so the app deposits from the account that
     # holds USDC + the trustline. Throwaway key (local/testnet only).
-    ALICE_SECRET=$(stellar keys show alice 2>/dev/null || stellar keys secret alice 2>/dev/null || true)
     ISSUER_SECRET=$(stellar keys show usdc-issuer 2>/dev/null || stellar keys secret usdc-issuer 2>/dev/null || true)
     RELAYER_SECRET=$(stellar keys show relayer 2>/dev/null || stellar keys secret relayer 2>/dev/null || true)
+    ADMIN_SECRET=$(stellar keys show alice 2>/dev/null || stellar keys secret alice 2>/dev/null || true)
+    # Only inject the dev secret key for local deployments (auto-connects a
+    # funded wallet). For testnet/production, users connect via Freighter.
+    if [ "$NETWORK" = "local" ]; then
+        ALICE_SECRET=$(stellar keys show alice 2>/dev/null || stellar keys secret alice 2>/dev/null || true)
+        DEV_KEY_LINE="NEXT_PUBLIC_DEV_SECRET_KEY=$ALICE_SECRET"
+    else
+        DEV_KEY_LINE="NEXT_PUBLIC_DEV_SECRET_KEY="
+    fi
     cat > frontend/.env.local <<EOF
     NEXT_PUBLIC_RPC_URL=$RPC_URL
     NEXT_PUBLIC_NETWORK_PASSPHRASE=$PASSPHRASE
-    NEXT_PUBLIC_DEV_SECRET_KEY=$ALICE_SECRET
+    $DEV_KEY_LINE
     NEXT_PUBLIC_USDC_CODE=USDC
     NEXT_PUBLIC_USDC_ISSUER=$ISSUER_ADDR
     USDC_ISSUER_SECRET=$ISSUER_SECRET
     RELAYER_SECRET=$RELAYER_SECRET
+    COMPLIANCE_ADMIN_SECRET=$ADMIN_SECRET
     NEXT_PUBLIC_POOL_CONTRACT_ID=$POOL_10
     NEXT_PUBLIC_POOL_TIERS=10 USDC:$POOL_10:100000000,100 USDC:$POOL_100:1000000000,1000 USDC:$POOL_1000:10000000000
     NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID=$COMPLIANCE_ID
@@ -233,5 +261,5 @@ test-e2e:
 clean:
     stellar container stop stellar-local 2>/dev/null || true
     rm -f .verifier_id .pool_id .compliance_id
-    rm -rf circuits/shielded_pool/target circuits/compliance/target
+    rm -rf circuits/shielded_pool/target circuits/compliance/target circuits/disclosure/target
     @echo "Cleaned."

@@ -2,6 +2,7 @@ import { Noir } from "@noir-lang/noir_js";
 import { UltraHonkBackend } from "@aztec/bb.js";
 import poolCircuit from "@/circuits/shielded_pool.json";
 import complianceCircuit from "@/circuits/compliance.json";
+import disclosureCircuit from "@/circuits/disclosure.json";
 
 interface ProofResult {
   proof: string;
@@ -77,6 +78,32 @@ export async function proveCompliance(inputs: {
     merkle_root: ensureHex(inputs.merkleRoot),
     kyc_hash: ensureHex(inputs.kycHash),
     disclosed_amount: inputs.disclosedAmount,
+    path_bits: inputs.pathBits.map(String),
+    path_siblings: inputs.pathSiblings.map(ensureHex),
+  });
+}
+
+export async function proveDisclosure(inputs: {
+  kycPreimage: string;
+  nullifier: string;
+  secret: string;
+  amount: string;
+  auditorKey: string;
+  merkleRoot: string;
+  kycHash: string;
+  threshold: string;
+  pathSiblings: string[];
+  pathBits: number[];
+}): Promise<ProofResult> {
+  return generateProof(disclosureCircuit as Record<string, unknown>, {
+    kyc_preimage: ensureHex(inputs.kycPreimage),
+    nullifier: ensureHex(inputs.nullifier),
+    secret: ensureHex(inputs.secret),
+    amount: inputs.amount,
+    auditor_key: ensureHex(inputs.auditorKey),
+    merkle_root: ensureHex(inputs.merkleRoot),
+    kyc_hash: ensureHex(inputs.kycHash),
+    threshold: inputs.threshold,
     path_bits: inputs.pathBits.map(String),
     path_siblings: inputs.pathSiblings.map(ensureHex),
   });

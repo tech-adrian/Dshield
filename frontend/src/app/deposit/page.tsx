@@ -15,14 +15,14 @@ import {
 import { saveNote, generateRandomField } from "@/lib/notes";
 import { saveDeposit } from "@/lib/deposits";
 import { computeCommitment } from "@/lib/poseidon2";
+import { TOKEN_DECIMALS, TOKEN_SYMBOL, formatStroops } from "@/lib/format";
+import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
+import { Card } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
+import { SelectButton } from "@/components/ui/SelectButton";
+import { StatusMessage } from "@/components/ui/StatusMessage";
 import * as StellarSdk from "@stellar/stellar-sdk";
-
-const TOKEN_DECIMALS = 7;
-const TOKEN_SYMBOL = "USDC";
-
-function formatAmount(stroops: number): string {
-  return `${(stroops / 10 ** TOKEN_DECIMALS).toFixed(0)} ${TOKEN_SYMBOL}`;
-}
 
 export default function DepositPage() {
   const { address, signTransaction } = useWallet();
@@ -173,24 +173,18 @@ export default function DepositPage() {
 
   if (!address) {
     return (
-      <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
-        <h1 className="text-2xl font-bold">Deposit</h1>
-        <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
-          <p className="text-zinc-400">Connect your wallet to deposit.</p>
-        </div>
-      </div>
+      <ConnectGate title="Deposit" prompt="Connect your wallet to deposit." />
     );
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
-      <h1 className="text-2xl font-bold">Deposit into Shielded Pool</h1>
-      <p className="mt-2 text-sm text-zinc-400">
-        Your funds are shielded using a cryptographic commitment. The commitment
-        is stored on-chain but reveals nothing about your identity or balance.
-      </p>
+    <PageShell>
+      <PageHeader
+        title="Deposit into Shielded Pool"
+        description="Your funds are shielded using a cryptographic commitment. The commitment is stored on-chain but reveals nothing about your identity or balance."
+      />
 
-      <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+      <Card className="mt-8">
         <div className="mb-6">
           <h3 className="text-sm font-medium text-zinc-400">How it works</h3>
           <ol className="mt-3 space-y-2 text-sm text-zinc-500">
@@ -208,18 +202,15 @@ export default function DepositPage() {
             </label>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               {tiers.map((tier) => (
-                <button
+                <SelectButton
                   key={tier.id}
+                  selected={selectedTier?.id === tier.id}
                   onClick={() => setSelectedTier(tier)}
                   disabled={isLoading}
-                  className={`rounded-lg border p-3 text-center text-sm font-medium transition-colors ${
-                    selectedTier?.id === tier.id
-                      ? "border-white bg-zinc-800 text-white"
-                      : "border-zinc-700 text-zinc-400 hover:border-zinc-500"
-                  } disabled:opacity-50`}
+                  className="text-center font-medium"
                 >
                   {tier.label}
-                </button>
+                </SelectButton>
               ))}
             </div>
           </div>
@@ -227,22 +218,18 @@ export default function DepositPage() {
 
         {selectedTier && (
           <div className="mb-4">
-            <label className="mb-1 block text-xs text-zinc-500">
-              Amount ({TOKEN_SYMBOL})
-            </label>
-            <input
+            <Input
               type="number"
+              label={`Amount (${TOKEN_SYMBOL})`}
+              mono
               value={customAmount}
               onChange={(e) => setCustomAmount(e.target.value)}
               placeholder={String(selectedTier.amount / 10 ** TOKEN_DECIMALS)}
               min={selectedTier.amount / 10 ** TOKEN_DECIMALS}
               step={selectedTier.amount / 10 ** TOKEN_DECIMALS}
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-800 p-3 font-mono text-sm text-zinc-300 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
-            />
-            <p className="mt-1 text-xs text-zinc-600">
-              {(() => {
+              hint={(() => {
                 if (!customAmount) {
-                  return `Leave empty for a single ${formatAmount(selectedTier.amount)} deposit. Enter a larger amount to create multiple notes.`;
+                  return `Leave empty for a single ${formatStroops(selectedTier.amount)} deposit. Enter a larger amount to create multiple notes.`;
                 }
                 const usdc = parseFloat(customAmount);
                 const tierUsdc = selectedTier.amount / 10 ** TOKEN_DECIMALS;
@@ -253,57 +240,57 @@ export default function DepositPage() {
                 const remainder = usdc - shielded;
                 return (
                   <>
-                    Creates <span className="text-zinc-400">{noteCount} note{noteCount > 1 ? "s" : ""}</span> of{" "}
-                    {formatAmount(selectedTier.amount)} each
+                    Creates{" "}
+                    <span className="text-zinc-400">
+                      {noteCount} note{noteCount > 1 ? "s" : ""}
+                    </span>{" "}
+                    of {formatStroops(selectedTier.amount)} each
                     {" = "}
-                    <span className="text-zinc-400">{shielded} {TOKEN_SYMBOL}</span> shielded
+                    <span className="text-zinc-400">
+                      {shielded} {TOKEN_SYMBOL}
+                    </span>{" "}
+                    shielded
                     {remainder > 0 && (
-                      <span className="text-yellow-500"> ({remainder} {TOKEN_SYMBOL} remainder not shielded)</span>
+                      <span className="text-yellow-500">
+                        {" "}
+                        ({remainder} {TOKEN_SYMBOL} remainder not shielded)
+                      </span>
                     )}
                   </>
                 );
               })()}
-            </p>
+            />
           </div>
         )}
 
-        <button
+        <Button
+          fullWidth
+          size="lg"
           onClick={handleDeposit}
-          disabled={isLoading || !selectedTier || (!!customAmount && noteCount <= 0)}
-          className="w-full rounded-lg bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={
+            isLoading || !selectedTier || (!!customAmount && noteCount <= 0)
+          }
         >
           {isLoading
             ? "Processing..."
             : selectedTier
               ? customAmount && noteCount > 1
-                ? `Shield ${noteCount * selectedTier.amount / 10 ** TOKEN_DECIMALS} ${TOKEN_SYMBOL} (${noteCount} notes)`
-                : `Shield ${formatAmount(selectedTier.amount)}`
+                ? `Shield ${(noteCount * selectedTier.amount) / 10 ** TOKEN_DECIMALS} ${TOKEN_SYMBOL} (${noteCount} notes)`
+                : `Shield ${formatStroops(selectedTier.amount)}`
               : "Select a denomination"}
-        </button>
+        </Button>
 
-        {status && (
-          <div
-            className={`mt-4 rounded-lg p-3 text-sm ${
-              status.startsWith("Error")
-                ? "bg-red-900/30 text-red-400"
-                : status.includes("successful")
-                  ? "bg-green-900/30 text-green-400"
-                  : "bg-zinc-800 text-zinc-300"
-            }`}
-          >
-            {status}
-          </div>
-        )}
+        {status && <StatusMessage message={status} className="mt-4" />}
 
         {lastCommitment && (
-          <div className="mt-4 rounded-lg bg-zinc-800 p-3">
+          <div className="mt-4 rounded-xl bg-zinc-800/80 p-3">
             <p className="text-xs text-zinc-500">Commitment (Poseidon2 hash)</p>
             <p className="mt-1 break-all font-mono text-xs text-zinc-300">
               {lastCommitment}
             </p>
           </div>
         )}
-      </div>
-    </div>
+      </Card>
+    </PageShell>
   );
 }

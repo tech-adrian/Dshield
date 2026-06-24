@@ -3,25 +3,35 @@
 import { useState } from "react";
 import { useWallet } from "@/components/WalletProvider";
 import {
+  POOL_CONTRACT_ID,
+  COMPLIANCE_CONTRACT_ID,
   buildContractCall,
   submitTransaction,
   queryContract,
-  POOL_CONTRACT_ID,
-  COMPLIANCE_CONTRACT_ID,
 } from "@/lib/stellar";
 import { getNotes, type ShieldedNote } from "@/lib/notes";
 import { getAllCommitments } from "@/lib/deposits";
 import { getKyc, saveKyc, type KycRecord } from "@/lib/kyc";
-import {
-  poseidon2Hash,
-  buildMerkleTree,
-} from "@/lib/poseidon2";
+import { poseidon2Hash, buildMerkleTree } from "@/lib/poseidon2";
 import { generateRandomField } from "@/lib/notes";
 import {
   syncDepositsFromChain,
   fetchCommitmentsFromChain,
 } from "@/lib/indexer";
-import { proveCompliance } from "@/lib/prover";
+import { proveCompliance, proveDisclosure } from "@/lib/prover";
+import {
+  TOKEN_SYMBOL,
+  stroopsToUsdc,
+  usdcToStroops,
+  truncateMiddle,
+} from "@/lib/format";
+import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
+import { Card } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
+import { SelectButton } from "@/components/ui/SelectButton";
+import { StatusMessage } from "@/components/ui/StatusMessage";
+import { ProgressSteps } from "@/components/ui/ProgressSteps";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 type ComplianceStep =
@@ -43,6 +53,14 @@ const STEP_LABELS: Record<ComplianceStep, string> = {
   done: "Compliance verified!",
 };
 
+const PROGRESS_STEPS = [
+  "registering_kyc",
+  "building_tree",
+  "generating_proof",
+  "signing",
+  "submitting",
+] as const;
+
 export default function CompliancePage() {
   const { address, signTransaction } = useWallet();
   const [status, setStatus] = useState("");
@@ -52,6 +70,10 @@ export default function CompliancePage() {
   const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
   const [auditorKey, setAuditorKey] = useState("");
   const [disclosedAmount, setDisclosedAmount] = useState("");
+  const [disclosureMode, setDisclosureMode] = useState<"exact" | "threshold">(
+    "exact",
+  );
+  const [threshold, setThreshold] = useState("");
   const [kyc, setKyc] = useState<KycRecord | null>(() => getKyc());
 
   const allNotes =
@@ -74,19 +96,15 @@ export default function CompliancePage() {
       );
       const kycHashClean = kycHash.replace(/^0x/, "");
 
-      const kycHashScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(kycHashClean, "hex"),
-      );
-
-      const tx = await buildContractCall(
-        COMPLIANCE_CONTRACT_ID,
-        "register_kyc",
-        [kycHashScVal],
-        address,
-      );
-
-      const signedXdr = await signTransaction(tx.toXDR());
-      const txHash = await submitTransaction(signedXdr);
+      const res = await fetch("/api/register-kyc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kycHash: kycHashClean }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        throw new Error(body.error || `KYC registration failed (${res.status})`);
+      }
 
       const record: KycRecord = {
         preimage,
@@ -98,7 +116,7 @@ export default function CompliancePage() {
       setKyc(record);
 
       setStep("idle");
-      setStatus(`KYC registered! TX: ${txHash.slice(0, 12)}...`);
+      setStatus(`KYC registered! TX: ${body.hash.slice(0, 12)}...`);
     } catch (err) {
       setStep("idle");
       const msg = err instanceof Error ? err.message : JSON.stringify(err);
@@ -119,18 +137,41 @@ export default function CompliancePage() {
       setStatus("Error: Enter an auditor key.");
       return;
     }
-    if (!disclosedAmount) {
-      setStatus("Error: Enter the amount to disclose.");
-      return;
-    }
 
     const noteAmount = selectedNote.amount || "0";
-    if (disclosedAmount !== noteAmount) {
-      setStatus(
-        `Error: Disclosed amount must match the note's amount (${noteAmount}). ` +
-          "The circuit enforces amount == disclosed_amount.",
-      );
-      return;
+    const noteUsdc = stroopsToUsdc(noteAmount);
+
+    if (disclosureMode === "exact") {
+      if (!disclosedAmount) {
+        setStatus("Error: Enter the amount to disclose.");
+        return;
+      }
+      const disclosedStroops = usdcToStroops(disclosedAmount);
+      if (disclosedStroops !== noteAmount) {
+        setStatus(
+          `Error: Disclosed amount must match the note's amount (${noteUsdc} ${TOKEN_SYMBOL}). ` +
+            "The circuit enforces amount == disclosed_amount.",
+        );
+        return;
+      }
+    } else {
+      if (!threshold) {
+        setStatus("Error: Enter a threshold amount.");
+        return;
+      }
+      const thresholdVal = parseFloat(threshold);
+      const amountVal = parseFloat(noteUsdc);
+      if (isNaN(thresholdVal) || thresholdVal <= 0) {
+        setStatus("Error: Threshold must be a positive number.");
+        return;
+      }
+      if (thresholdVal > amountVal) {
+        setStatus(
+          `Error: Threshold (${threshold} ${TOKEN_SYMBOL}) exceeds note balance (${noteUsdc} ${TOKEN_SYMBOL}). ` +
+            "The proof would fail.",
+        );
+        return;
+      }
     }
 
     setIsLoading(true);
@@ -203,20 +244,37 @@ export default function CompliancePage() {
       let proof: string;
       let publicInputs: string;
       try {
-        const result = await proveCompliance({
-          kycPreimage: kyc.preimage,
-          nullifier: selectedNote.nullifier,
-          secret: selectedNote.secret,
-          amount: noteAmount,
-          auditorKey,
-          merkleRoot: onChainRoot,
-          kycHash: "0x" + kyc.hash,
-          disclosedAmount,
-          pathSiblings: merkle.pathSiblings,
-          pathBits: merkle.pathBits,
-        });
-        proof = result.proof;
-        publicInputs = result.publicInputs;
+        if (disclosureMode === "exact") {
+          const result = await proveCompliance({
+            kycPreimage: kyc.preimage,
+            nullifier: selectedNote.nullifier,
+            secret: selectedNote.secret,
+            amount: noteAmount,
+            auditorKey,
+            merkleRoot: onChainRoot,
+            kycHash: "0x" + kyc.hash,
+            disclosedAmount: usdcToStroops(disclosedAmount),
+            pathSiblings: merkle.pathSiblings,
+            pathBits: merkle.pathBits,
+          });
+          proof = result.proof;
+          publicInputs = result.publicInputs;
+        } else {
+          const result = await proveDisclosure({
+            kycPreimage: kyc.preimage,
+            nullifier: selectedNote.nullifier,
+            secret: selectedNote.secret,
+            amount: noteAmount,
+            auditorKey,
+            merkleRoot: onChainRoot,
+            kycHash: "0x" + kyc.hash,
+            threshold: usdcToStroops(threshold),
+            pathSiblings: merkle.pathSiblings,
+            pathBits: merkle.pathBits,
+          });
+          proof = result.proof;
+          publicInputs = result.publicInputs;
+        }
       } catch (proveErr) {
         setStep("idle");
         const msg =
@@ -225,6 +283,9 @@ export default function CompliancePage() {
         setIsLoading(false);
         return;
       }
+
+      const contractMethod =
+        disclosureMode === "exact" ? "verify_compliance" : "verify_disclosure";
 
       setStep("signing");
       const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
@@ -236,7 +297,7 @@ export default function CompliancePage() {
 
       const tx = await buildContractCall(
         COMPLIANCE_CONTRACT_ID,
-        "verify_compliance",
+        contractMethod,
         [publicInputsScVal, proofScVal],
         address,
       );
@@ -247,7 +308,13 @@ export default function CompliancePage() {
       const txHash = await submitTransaction(signedXdr);
 
       setStep("done");
-      setStatus(`Compliance verified! TX: ${txHash.slice(0, 12)}...`);
+      if (disclosureMode === "exact") {
+        setStatus(`Compliance verified! TX: ${txHash.slice(0, 12)}...`);
+      } else {
+        setStatus(
+          `Disclosure verified! Proved balance >= ${threshold} ${TOKEN_SYMBOL} to auditor. TX: ${txHash.slice(0, 12)}...`,
+        );
+      }
     } catch (err) {
       setStep("idle");
       const msg = err instanceof Error ? err.message : JSON.stringify(err);
@@ -260,28 +327,23 @@ export default function CompliancePage() {
 
   if (!address) {
     return (
-      <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
-        <h1 className="text-2xl font-bold">Compliance</h1>
-        <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
-          <p className="text-zinc-400">
-            Connect your wallet to verify compliance.
-          </p>
-        </div>
-      </div>
+      <ConnectGate
+        title="Compliance"
+        prompt="Connect your wallet to verify compliance."
+      />
     );
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
-      <h1 className="text-2xl font-bold">Selective Disclosure</h1>
-      <p className="mt-2 text-sm text-zinc-400">
-        Prove KYC compliance and disclose specific transaction details to an
-        auditor without revealing your full identity or transaction history.
-      </p>
+    <PageShell>
+      <PageHeader
+        title="Selective Disclosure"
+        description="Prove KYC compliance and disclose specific transaction details to an auditor without revealing your full identity or transaction history."
+      />
 
       <div className="mt-8 space-y-6">
         {/* Step 1: KYC Registration */}
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <Card>
           <h3 className="text-sm font-medium text-zinc-400">
             Step 1: KYC Registration
           </h3>
@@ -290,31 +352,32 @@ export default function CompliancePage() {
               <div className="flex items-center gap-2 text-sm text-green-400">
                 <span>KYC Registered</span>
               </div>
-              <div className="mt-2 text-xs font-mono text-zinc-500 break-all">
-                Hash: {kyc.hash.slice(0, 16)}...{kyc.hash.slice(-16)}
+              <div className="mt-2 break-all font-mono text-xs text-zinc-500">
+                Hash: {truncateMiddle(kyc.hash, 16, 16)}
               </div>
             </div>
           ) : (
             <div className="mt-3">
-              <p className="text-sm text-zinc-500 mb-3">
+              <p className="mb-3 text-sm text-zinc-500">
                 Generate and register a KYC hash on-chain. A random preimage is
                 created and stored locally - only you know it.
               </p>
-              <button
+              <Button
+                fullWidth
+                variant="outline"
                 onClick={handleSetupKyc}
                 disabled={isLoading || !COMPLIANCE_CONTRACT_ID}
-                className="w-full rounded-lg bg-zinc-700 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {isLoading && step === "registering_kyc"
                   ? "Registering..."
                   : "Register KYC"}
-              </button>
+              </Button>
             </div>
           )}
-        </div>
+        </Card>
 
         {/* Step 2: Select Note */}
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+        <Card>
           <h3 className="text-sm font-medium text-zinc-400">
             Step 2: Select a Note ({allNotes.length} available)
           </h3>
@@ -325,145 +388,164 @@ export default function CompliancePage() {
           ) : (
             <div className="mt-3 space-y-2">
               {allNotes.map((note) => (
-                <button
+                <SelectButton
                   key={note.commitment}
+                  selected={selectedNote?.commitment === note.commitment}
                   onClick={() => {
                     if (!isLoading) {
                       setSelectedNote(note);
-                      setDisclosedAmount(note.amount || "0");
+                      setDisclosedAmount(stroopsToUsdc(note.amount || "0"));
                     }
                   }}
                   disabled={isLoading}
-                  className={`w-full rounded-lg border p-3 text-left text-sm transition-colors ${
-                    selectedNote?.commitment === note.commitment
-                      ? "border-white bg-zinc-800"
-                      : "border-zinc-800 hover:border-zinc-700"
-                  } disabled:opacity-50`}
+                  className="w-full border-zinc-800 text-left hover:border-zinc-700"
                 >
                   <div className="font-mono text-xs text-zinc-300">
-                    {note.commitment.slice(0, 16)}...
-                    {note.commitment.slice(-16)}
+                    {truncateMiddle(note.commitment, 16, 16)}
                   </div>
                   <div className="mt-1 flex justify-between text-xs text-zinc-500">
-                    <span>Amount: {note.amount || "N/A"}</span>
+                    <span>
+                      {stroopsToUsdc(note.amount || "0")} {TOKEN_SYMBOL}
+                    </span>
                     <span>Leaf #{note.leafIndex}</span>
                   </div>
-                </button>
+                </SelectButton>
               ))}
             </div>
           )}
-        </div>
+        </Card>
 
         {/* Step 3: Disclosure Details */}
         {selectedNote && kyc?.registeredOnChain && (
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+          <Card>
             <h3 className="mb-3 text-sm font-medium text-zinc-400">
               Step 3: Disclosure Details
             </h3>
             <div className="space-y-4">
+              {/* Mode toggle */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">
-                  Auditor Key (field element)
+                <label className="mb-2 block text-xs text-zinc-500">
+                  Disclosure Mode
                 </label>
-                <input
-                  type="text"
-                  value={auditorKey}
-                  onChange={(e) => setAuditorKey(e.target.value.trim())}
-                  placeholder="e.g. 42 or 0xabcd..."
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-800 p-3 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
-                />
-                <p className="mt-1 text-xs text-zinc-600">
-                  The auditor&apos;s public identifier. Binds the proof to this
-                  specific auditor.
+                <div className="grid grid-cols-2 gap-2">
+                  <SelectButton
+                    selected={disclosureMode === "exact"}
+                    onClick={() => setDisclosureMode("exact")}
+                    disabled={isLoading}
+                    className="text-center font-medium"
+                  >
+                    Exact Amount
+                  </SelectButton>
+                  <SelectButton
+                    selected={disclosureMode === "threshold"}
+                    tone="accent"
+                    onClick={() => setDisclosureMode("threshold")}
+                    disabled={isLoading}
+                    className="text-center font-medium"
+                  >
+                    Balance Threshold
+                  </SelectButton>
+                </div>
+                <p className="mt-2 text-xs text-zinc-600">
+                  {disclosureMode === "exact"
+                    ? "Reveal the exact amount to the auditor."
+                    : "Prove your balance meets a minimum without revealing the exact amount."}
                 </p>
               </div>
-              <div>
-                <label className="mb-1 block text-xs text-zinc-500">
-                  Disclosed Amount
-                </label>
-                <input
-                  type="text"
+
+              {/* Auditor key */}
+              <Input
+                label="Auditor Key (field element)"
+                mono
+                value={auditorKey}
+                onChange={(e) => setAuditorKey(e.target.value.trim())}
+                placeholder="e.g. 42 or 0xabcd..."
+                hint="The auditor's public identifier. Binds the proof to this specific auditor."
+              />
+
+              {/* Exact mode: disclosed amount */}
+              {disclosureMode === "exact" && (
+                <Input
+                  type="number"
+                  label={`Disclosed Amount (${TOKEN_SYMBOL})`}
+                  mono
                   value={disclosedAmount}
                   onChange={(e) => setDisclosedAmount(e.target.value.trim())}
-                  placeholder="1000000"
-                  className="w-full rounded-lg border border-zinc-700 bg-zinc-800 p-3 font-mono text-xs text-zinc-300 placeholder-zinc-600 focus:border-zinc-500 focus:outline-none"
+                  placeholder="10"
+                  step="any"
+                  hint={
+                    <>
+                      Must match the note&apos;s actual amount (
+                      {stroopsToUsdc(selectedNote.amount || "0")} {TOKEN_SYMBOL}
+                      ). The circuit enforces this equality.
+                    </>
+                  }
                 />
-                <p className="mt-1 text-xs text-zinc-600">
-                  Must match the note&apos;s actual amount ({selectedNote.amount || "N/A"}).
-                  The circuit enforces this equality.
-                </p>
-              </div>
+              )}
+
+              {/* Threshold mode: minimum balance */}
+              {disclosureMode === "threshold" && (
+                <Input
+                  type="number"
+                  label={`Minimum Balance (${TOKEN_SYMBOL})`}
+                  mono
+                  value={threshold}
+                  onChange={(e) => setThreshold(e.target.value.trim())}
+                  placeholder={`e.g. ${Number(stroopsToUsdc(selectedNote.amount || "0")) / 2}`}
+                  step="any"
+                  className="border-brand-800/50 focus-visible:border-brand-500"
+                  hint={
+                    <>
+                      Prove your balance is at least this amount. The auditor
+                      learns the threshold was met but not your exact balance.
+                      Note balance: {stroopsToUsdc(selectedNote.amount || "0")}{" "}
+                      {TOKEN_SYMBOL}.
+                    </>
+                  }
+                />
+              )}
             </div>
-          </div>
+          </Card>
         )}
 
         {/* Submit Button */}
         {selectedNote && kyc?.registeredOnChain && (
-          <button
+          <Button
+            fullWidth
+            size="lg"
+            variant={disclosureMode === "threshold" ? "accent" : "primary"}
             onClick={handleVerifyCompliance}
-            disabled={isLoading || !auditorKey || !disclosedAmount}
-            className="w-full rounded-lg bg-white py-3 text-sm font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={
+              isLoading ||
+              !auditorKey ||
+              (disclosureMode === "exact" ? !disclosedAmount : !threshold)
+            }
           >
-            {isLoading ? "Processing..." : "Generate Proof & Verify Compliance"}
-          </button>
+            {isLoading
+              ? "Processing..."
+              : disclosureMode === "exact"
+                ? "Generate Proof & Verify Compliance"
+                : "Generate Threshold Proof & Verify"}
+          </Button>
         )}
 
         {/* Progress */}
         {step !== "idle" && step !== "done" && (
-          <div className="rounded-lg bg-zinc-800 p-4">
-            <div className="flex items-center gap-3">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-400 border-t-white" />
-              <span className="text-sm text-zinc-300">
-                {STEP_LABELS[step]}
-              </span>
-            </div>
-            <div className="mt-3 flex gap-1">
-              {(
-                [
-                  "registering_kyc",
-                  "building_tree",
-                  "generating_proof",
-                  "signing",
-                  "submitting",
-                ] as ComplianceStep[]
-              ).map((s, i) => (
-                <div
-                  key={s}
-                  className={`h-1 flex-1 rounded-full ${
-                    stepIndex(step) >= i ? "bg-white" : "bg-zinc-700"
-                  }`}
-                />
-              ))}
-            </div>
-          </div>
+          <ProgressSteps
+            label={STEP_LABELS[step]}
+            steps={PROGRESS_STEPS}
+            current={step}
+          />
         )}
 
         {/* Status */}
         {status && (
-          <div
-            className={`rounded-lg p-3 text-sm ${
-              status.startsWith("Error")
-                ? "bg-red-900/30 text-red-400"
-                : status.includes("verified") || status.includes("registered")
-                  ? "bg-green-900/30 text-green-400"
-                  : "bg-zinc-800 text-zinc-300"
-            }`}
-          >
-            {status}
-          </div>
+          <StatusMessage
+            message={status}
+            successHints={["verified", "registered"]}
+          />
         )}
       </div>
-    </div>
+    </PageShell>
   );
-}
-
-function stepIndex(s: ComplianceStep): number {
-  const order: ComplianceStep[] = [
-    "registering_kyc",
-    "building_tree",
-    "generating_proof",
-    "signing",
-    "submitting",
-  ];
-  return order.indexOf(s);
 }

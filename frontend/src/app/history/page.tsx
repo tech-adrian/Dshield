@@ -4,9 +4,11 @@ import { useState } from "react";
 import { useWallet } from "@/components/WalletProvider";
 import { getNotes } from "@/lib/notes";
 import { getKyc } from "@/lib/kyc";
-
-const TOKEN_DECIMALS = 7;
-const TOKEN_SYMBOL = "USDC";
+import { formatStroopsOrDash } from "@/lib/format";
+import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
+import { Card } from "@/components/ui/Card";
+import { Badge, type BadgeProps } from "@/components/ui/Badge";
+import { cn } from "@/lib/cn";
 
 type ActivityItem = {
   type: "deposit" | "withdrawal" | "compliance";
@@ -56,31 +58,14 @@ function buildActivity(): ActivityItem[] {
   return items;
 }
 
-function formatAmount(stroops: string): string {
-  const n = Number(stroops);
-  if (!n) return "—";
-  return `${(n / 10 ** TOKEN_DECIMALS).toFixed(0)} ${TOKEN_SYMBOL}`;
-}
-
-function TypeBadge({ type }: { type: ActivityItem["type"] }) {
-  const styles = {
-    deposit: "bg-green-900/30 text-green-400",
-    withdrawal: "bg-blue-900/30 text-blue-400",
-    compliance: "bg-purple-900/30 text-purple-400",
-  };
-  const labels = {
-    deposit: "Deposit",
-    withdrawal: "Withdrawal",
-    compliance: "KYC Registered",
-  };
-  return (
-    <span
-      className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${styles[type]}`}
-    >
-      {labels[type]}
-    </span>
-  );
-}
+const TYPE_META: Record<
+  ActivityItem["type"],
+  { tone: BadgeProps["tone"]; label: string }
+> = {
+  deposit: { tone: "green", label: "Deposit" },
+  withdrawal: { tone: "blue", label: "Withdrawal" },
+  compliance: { tone: "purple", label: "KYC Registered" },
+};
 
 type FilterType = "all" | "deposit" | "withdrawal" | "compliance";
 
@@ -100,43 +85,38 @@ export default function HistoryPage() {
 
   if (!address) {
     return (
-      <div className="mx-auto max-w-2xl px-6 py-16">
-        <h1 className="text-2xl font-bold">History</h1>
-        <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
-          <p className="text-zinc-400">
-            Connect your wallet to view history.
-          </p>
-        </div>
-      </div>
+      <ConnectGate
+        title="History"
+        prompt="Connect your wallet to view history."
+      />
     );
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-16">
-      <h1 className="text-2xl font-bold">Activity History</h1>
-      <p className="mt-2 text-sm text-zinc-400">
-        All shielded deposits, withdrawals, and compliance actions stored
-        locally on this device.
-      </p>
+    <PageShell>
+      <PageHeader
+        title="Activity History"
+        description="All shielded deposits, withdrawals, and compliance actions stored locally on this device."
+      />
 
       {/* Stats */}
       <div className="mt-8 grid grid-cols-3 gap-3">
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">
+        <Card padding="sm" className="text-center">
           <p className="text-2xl font-bold text-green-400">{stats.deposits}</p>
           <p className="mt-1 text-xs text-zinc-500">Deposits</p>
-        </div>
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">
+        </Card>
+        <Card padding="sm" className="text-center">
           <p className="text-2xl font-bold text-blue-400">
             {stats.withdrawals}
           </p>
           <p className="mt-1 text-xs text-zinc-500">Withdrawals</p>
-        </div>
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">
+        </Card>
+        <Card padding="sm" className="text-center">
           <p className="text-2xl font-bold text-purple-400">
             {stats.compliance}
           </p>
           <p className="mt-1 text-xs text-zinc-500">KYC Proofs</p>
-        </div>
+        </Card>
       </div>
 
       {/* Filters */}
@@ -152,11 +132,12 @@ export default function HistoryPage() {
           <button
             key={key}
             onClick={() => setFilter(key)}
-            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={cn(
+              "rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
               filter === key
                 ? "bg-zinc-800 text-white"
-                : "text-zinc-500 hover:text-white hover:bg-zinc-800/50"
-            }`}
+                : "text-zinc-500 hover:bg-zinc-800/50 hover:text-white",
+            )}
           >
             {label}
           </button>
@@ -166,26 +147,29 @@ export default function HistoryPage() {
       {/* Activity list */}
       <div className="mt-6 space-y-2">
         {filtered.length === 0 ? (
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
+          <Card className="p-8 text-center">
             <p className="text-sm text-zinc-500">
               {activity.length === 0
                 ? "No activity yet. Make your first deposit to get started."
                 : "No matching activity."}
             </p>
-          </div>
+          </Card>
         ) : (
           filtered.map((item, i) => (
-            <div
+            <Card
               key={`${item.commitment}-${item.type}-${i}`}
-              className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 transition-colors hover:border-zinc-700"
+              interactive
+              padding="sm"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <TypeBadge type={item.type} />
+                    <Badge tone={TYPE_META[item.type].tone}>
+                      {TYPE_META[item.type].label}
+                    </Badge>
                     {item.type !== "compliance" && (
                       <span className="text-sm font-semibold text-white">
-                        {formatAmount(item.amount)}
+                        {formatStroopsOrDash(item.amount)}
                       </span>
                     )}
                   </div>
@@ -197,10 +181,10 @@ export default function HistoryPage() {
                   {new Date(item.timestamp).toLocaleDateString()}
                 </span>
               </div>
-            </div>
+            </Card>
           ))
         )}
       </div>
-    </div>
+    </PageShell>
   );
 }
