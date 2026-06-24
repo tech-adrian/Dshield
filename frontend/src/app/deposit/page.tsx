@@ -173,7 +173,7 @@ export default function DepositPage() {
 
   if (!address) {
     return (
-      <div className="mx-auto max-w-2xl px-6 py-16">
+      <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
         <h1 className="text-2xl font-bold">Deposit</h1>
         <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
           <p className="text-zinc-400">Connect your wallet to deposit.</p>
@@ -183,7 +183,7 @@ export default function DepositPage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-16">
+    <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
       <h1 className="text-2xl font-bold">Deposit into Shielded Pool</h1>
       <p className="mt-2 text-sm text-zinc-400">
         Your funds are shielded using a cryptographic commitment. The commitment
@@ -206,7 +206,7 @@ export default function DepositPage() {
             <label className="mb-2 block text-xs text-zinc-500">
               Select Denomination
             </label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               {tiers.map((tier) => (
                 <button
                   key={tier.id}

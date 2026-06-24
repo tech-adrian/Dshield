@@ -283,7 +283,7 @@ export default function WithdrawPage() {
 
   if (!address) {
     return (
-      <div className="mx-auto max-w-2xl px-6 py-16">
+      <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
         <h1 className="text-2xl font-bold">Withdraw</h1>
         <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
           <p className="text-zinc-400">Connect your wallet to withdraw.</p>
@@ -293,7 +293,7 @@ export default function WithdrawPage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-16">
+    <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
       <h1 className="text-2xl font-bold">Withdraw from Shielded Pool</h1>
       <p className="mt-2 text-sm text-zinc-400">
         Prove you own a note in the Merkle tree without revealing which one.

@@ -260,7 +260,7 @@ export default function CompliancePage() {
 
   if (!address) {
     return (
-      <div className="mx-auto max-w-2xl px-6 py-16">
+      <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
         <h1 className="text-2xl font-bold">Compliance</h1>
         <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900 p-8 text-center">
           <p className="text-zinc-400">
@@ -272,7 +272,7 @@ export default function CompliancePage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-16">
+    <div className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-16">
       <h1 className="text-2xl font-bold">Selective Disclosure</h1>
       <p className="mt-2 text-sm text-zinc-400">
         Prove KYC compliance and disclose specific transaction details to an
