@@ -158,7 +158,7 @@ jobs:
 
       - name: Build contract WASMs
         run: |
-          cargo install --locked stellar-cli --features opt || true
+          cargo install --locked stellar-cli || true
           stellar contract build
 
   frontend:
@@ -232,7 +232,7 @@ jobs:
           version: 11
 
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli --features opt || true
+        run: cargo install --locked stellar-cli || true
 
       - name: Install Nargo
         run: |
