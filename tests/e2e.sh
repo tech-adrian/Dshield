@@ -18,12 +18,12 @@ fail=0
 
 ok() {
   echo -e "  ${GREEN}PASS${NC} $1"
-  ((pass++))
+  pass=$((pass + 1))
 }
 
 err() {
   echo -e "  ${RED}FAIL${NC} $1: $2"
-  ((fail++))
+  fail=$((fail + 1))
 }
 
 section() {
