@@ -21,7 +21,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: |
+          for i in 1 2 3; do
+            cargo install cargo-audit --locked && break
+            echo "cargo install attempt $i failed, retrying..." && sleep 15
+          done
+          cargo audit --version
 
       - name: Audit dependencies
         run: cargo audit
@@ -156,10 +161,14 @@ jobs:
       - name: Run contract tests
         run: cargo test --workspace
 
-      - name: Build contract WASMs
+      - name: Install Stellar CLI
         run: |
-          cargo install --locked stellar-cli || true
-          stellar contract build
+          curl -sSfL "https://github.com/stellar/stellar-cli/releases/download/v27.0.0/stellar-cli-27.0.0-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar xz -C /usr/local/bin
+          stellar --version
+
+      - name: Build contract WASMs
+        run: stellar contract build
 
   frontend:
     name: Frontend
@@ -232,7 +241,10 @@ jobs:
           version: 11
 
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli || true
+        run: |
+          curl -sSfL "https://github.com/stellar/stellar-cli/releases/download/v27.0.0/stellar-cli-27.0.0-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar xz -C /usr/local/bin
+          stellar --version
 
       - name: Install Nargo
         run: |
