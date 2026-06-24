@@ -1,0 +1,55 @@
+import { cva, type VariantProps } from "class-variance-authority";
+import { cn } from "@/lib/cn";
+
+const card = cva("rounded-2xl border bg-zinc-900/70 backdrop-blur-sm", {
+  variants: {
+    border: {
+      default: "border-zinc-800",
+      brand: "border-brand-500/30 bg-brand-950/10",
+    },
+    interactive: {
+      true: "transition-colors hover:border-zinc-700",
+    },
+    padding: {
+      none: "",
+      sm: "p-4",
+      md: "p-6",
+    },
+  },
+  defaultVariants: {
+    border: "default",
+    padding: "md",
+  },
+});
+
+export interface CardProps
+  extends React.HTMLAttributes<HTMLDivElement>,
+    VariantProps<typeof card> {}
+
+export function Card({
+  className,
+  border,
+  interactive,
+  padding,
+  ...props
+}: CardProps) {
+  return (
+    <div
+      className={cn(card({ border, interactive, padding }), className)}
+      {...props}
+    />
+  );
+}
+
+/** Small uppercase-weight section label used as a card heading. */
+export function CardLabel({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLHeadingElement>) {
+  return (
+    <h3
+      className={cn("text-sm font-medium text-zinc-400", className)}
+      {...props}
+    />
+  );
+}
