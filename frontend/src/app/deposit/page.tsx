@@ -12,7 +12,12 @@ import {
   getUsdcSacId,
   type PoolTier,
 } from "@/lib/stellar";
-import { saveNote, generateRandomField } from "@/lib/notes";
+import {
+  saveNote,
+  serializeNote,
+  generateRandomField,
+  type ShieldedNote,
+} from "@/lib/notes";
 import { saveDeposit } from "@/lib/deposits";
 import { computeCommitment } from "@/lib/poseidon2";
 import { TOKEN_DECIMALS, TOKEN_SYMBOL, formatStroops } from "@/lib/format";
@@ -28,7 +33,8 @@ export default function DepositPage() {
   const { address, signTransaction } = useWallet();
   const [status, setStatus] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
-  const [lastCommitment, setLastCommitment] = useState<string>("");
+  const [sessionNotes, setSessionNotes] = useState<ShieldedNote[]>([]);
+  const [copiedKey, setCopiedKey] = useState<string>("");
   const [customAmount, setCustomAmount] = useState<string>("");
   const [tiers] = useState<PoolTier[]>(() => getPoolTiers());
   const [selectedTier, setSelectedTier] = useState<PoolTier | null>(() => {
@@ -50,7 +56,9 @@ export default function DepositPage() {
     if (!address || !selectedTier || totalNotes <= 0) return;
 
     setIsLoading(true);
+    setSessionNotes([]);
     const total = totalNotes;
+    const created: ShieldedNote[] = [];
 
     try {
       // Make sure the connected wallet can actually hold and pay USDC:
@@ -129,7 +137,7 @@ export default function DepositPage() {
         );
         await submitTransaction(signedXdr);
 
-        saveNote({
+        const note: ShieldedNote = {
           nullifier,
           secret,
           commitment: commitmentClean,
@@ -138,7 +146,9 @@ export default function DepositPage() {
           spent: false,
           createdAt: Date.now(),
           poolId: selectedTier.id,
-        });
+        };
+        saveNote(note);
+        created.push(note);
 
         saveDeposit({
           commitment: commitmentClean,
@@ -146,9 +156,9 @@ export default function DepositPage() {
           timestamp: Date.now(),
           poolId: selectedTier.id,
         });
-
-        setLastCommitment(commitmentClean);
       }
+
+      setSessionNotes(created);
 
       const totalUsdc = (total * selectedTier.amount) / 10 ** TOKEN_DECIMALS;
       setStatus(
@@ -169,6 +179,23 @@ export default function DepositPage() {
       setIsLoading(false);
       setCustomAmount("");
     }
+  }
+
+  function copyText(text: string, key: string) {
+    void navigator.clipboard?.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((c) => (c === key ? "" : c)), 1500);
+  }
+
+  function downloadBackup() {
+    const body = sessionNotes.map(serializeNote).join("\n") + "\n";
+    const blob = new Blob([body], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dshield-notes-${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   if (!address) {
@@ -282,12 +309,60 @@ export default function DepositPage() {
 
         {status && <StatusMessage message={status} className="mt-4" />}
 
-        {lastCommitment && (
-          <div className="mt-4 rounded-xl bg-zinc-800/80 p-3">
-            <p className="text-xs text-zinc-500">Commitment (Poseidon2 hash)</p>
-            <p className="mt-1 break-all font-mono text-xs text-zinc-300">
-              {lastCommitment}
-            </p>
+        {sessionNotes.length > 0 && (
+          <div className="mt-4 space-y-3">
+            <div className="rounded-xl border border-yellow-600/40 bg-yellow-950/20 p-3">
+              <p className="text-xs font-semibold text-yellow-300">
+                Back up your shielded note
+                {sessionNotes.length > 1 ? "s" : ""}
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-yellow-200/70">
+                This note is the <span className="font-medium">only</span> way to
+                withdraw these funds. It&apos;s saved in this browser, but if you
+                clear site data or switch devices it&apos;s gone for good. Copy it
+                or download the backup and keep it somewhere safe and private —
+                anyone with the note can spend it.
+              </p>
+            </div>
+
+            {sessionNotes.map((note, i) => {
+              const serialized = serializeNote(note);
+              return (
+                <div
+                  key={note.commitment}
+                  className="rounded-xl bg-zinc-800/80 p-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs text-zinc-500">
+                      Shielded Note
+                      {sessionNotes.length > 1
+                        ? ` ${i + 1}/${sessionNotes.length}`
+                        : ""}{" "}
+                      · {formatStroops(Number(note.amount))}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => copyText(serialized, note.commitment)}
+                      className="shrink-0 text-xs font-medium text-brand-400 hover:text-brand-300"
+                    >
+                      {copiedKey === note.commitment ? "Copied!" : "Copy note"}
+                    </button>
+                  </div>
+                  <p className="mt-1.5 break-all font-mono text-xs text-zinc-200">
+                    {serialized}
+                  </p>
+                  <p className="mt-2 break-all font-mono text-[11px] text-zinc-600">
+                    Commitment: {note.commitment}
+                  </p>
+                </div>
+              );
+            })}
+
+            <Button variant="outline" fullWidth onClick={downloadBackup}>
+              {sessionNotes.length > 1
+                ? `Download all ${sessionNotes.length} notes (.txt)`
+                : "Download note backup (.txt)"}
+            </Button>
           </div>
         )}
       </Card>
