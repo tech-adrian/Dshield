@@ -5,6 +5,7 @@ import {
   computeNullifierHash,
   getZeroHashes,
   buildMerkleTree,
+  normalizeField,
 } from "./poseidon2";
 
 const ZERO_32 = "0x" + "00".repeat(32);
@@ -12,6 +13,36 @@ const KNOWN_ZERO_HASH =
   "0x0b63a53787021a4a962a452c2921b3663aff1ffd8d5510540f8e659e782956f1";
 const KNOWN_NULLIFIER_HASH =
   "0x2b0c9e50ac135931c5f87dff253337d63f6fe5f8b0f2489b92a5a9446cc4b3d2";
+
+describe("normalizeField", () => {
+  it("left-pads a value whose top byte is zero to 32 bytes", () => {
+    // Regression: the Noir hasher returns this root unpadded; on-chain it is a
+    // full 32-byte value. They must compare equal after normalization.
+    expect(
+      normalizeField("0x301b2607fdf1a5aed8e781d63cd1b03545333687293c81aceeb7e9ea61c140"),
+    ).toBe(
+      "0x00301b2607fdf1a5aed8e781d63cd1b03545333687293c81aceeb7e9ea61c140",
+    );
+  });
+
+  it("leaves a full 32-byte value unchanged", () => {
+    const full =
+      "0x0b63a53787021a4a962a452c2921b3663aff1ffd8d5510540f8e659e782956f1";
+    expect(normalizeField(full)).toBe(full);
+  });
+
+  it("adds the 0x prefix and pads when missing", () => {
+    expect(normalizeField("04d2")).toBe("0x" + "04d2".padStart(64, "0"));
+  });
+
+  it("always yields 32 bytes (66 chars with 0x)", () => {
+    expect(normalizeField("0x1").length).toBe(66);
+  });
+
+  it("throws if the value exceeds 32 bytes", () => {
+    expect(() => normalizeField("0x" + "ff".repeat(33))).toThrow();
+  });
+});
 
 describe("poseidon2Hash", () => {
   it("hashes two zero fields to the known zero hash", async () => {

@@ -12,7 +12,12 @@ import {
   relayWithdrawal,
   POOL_CONTRACT_ID,
 } from "@/lib/stellar";
-import { getActiveNotes, markNoteSpent, type ShieldedNote } from "@/lib/notes";
+import {
+  getActiveNotes,
+  markNoteSpent,
+  saveNoteIfNew,
+  type ShieldedNote,
+} from "@/lib/notes";
 import { getAllCommitments, clearDeposits } from "@/lib/deposits";
 import {
   computeNullifierHash,
@@ -32,6 +37,7 @@ import { Input } from "@/components/ui/Input";
 import { SelectButton } from "@/components/ui/SelectButton";
 import { StatusMessage } from "@/components/ui/StatusMessage";
 import { ProgressSteps } from "@/components/ui/ProgressSteps";
+import { NoteImport } from "@/components/ui/NoteImport";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 type WithdrawStep =
@@ -343,6 +349,14 @@ export default function WithdrawPage() {
             </div>
           )}
         </Card>
+
+        <NoteImport
+          disabled={isLoading}
+          onImport={(note) => {
+            saveNoteIfNew(note);
+            setSelectedNote(note);
+          }}
+        />
 
         {selectedNote && (
           <>
