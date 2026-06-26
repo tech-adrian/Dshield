@@ -30,6 +30,104 @@ export async function fetchCommitmentsFromChain(
   });
 }
 
+export interface NoteTxRefs {
+  depositTx: { hash: string; at: string } | null;
+  withdrawTx: { hash: string; at: string } | null;
+}
+
+/**
+ * Best-effort lookup of the on-chain transactions that touched a note, for the
+ * compliance report: the deposit tx that inserted `commitmentHex`, and the
+ * withdraw tx that spent `nullifierHashHex` (if any). Both are derived purely
+ * from public events — anyone holding the note can reproduce them. Returns
+ * nulls for whatever the RPC's event retention can't reach; the report falls
+ * back to the authoritative contract views (get_commitments / is_nullifier_used)
+ * for the confirmed/withdrawn facts, so missing tx links never block a report.
+ */
+export async function lookupNoteTxs(
+  poolId: string,
+  commitmentHex: string,
+  nullifierHashHex: string,
+): Promise<NoteTxRefs> {
+  const server = getRpcServer();
+  const wantCommitment = commitmentHex.replace(/^0x/, "").toLowerCase();
+  const wantNullifier = nullifierHashHex.replace(/^0x/, "").toLowerCase();
+
+  const refs: NoteTxRefs = { depositTx: null, withdrawTx: null };
+
+  let startLedger = 1;
+  let cursor: string | undefined;
+  let triedRetentionFallback = false;
+  let hasMore = true;
+
+  while (hasMore && (!refs.depositTx || !refs.withdrawTx)) {
+    let response: StellarSdk.rpc.Api.GetEventsResponse;
+    try {
+      const filters = [{ type: "contract" as const, contractIds: [poolId] }];
+      const opts = cursor
+        ? { filters, cursor, limit: 100 }
+        : { filters, startLedger, limit: 100 };
+      response = await server.getEvents(opts);
+    } catch {
+      if (!cursor && !triedRetentionFallback) {
+        triedRetentionFallback = true;
+        try {
+          const latest = await server.getLatestLedger();
+          startLedger = Math.max(1, latest.sequence - 17280);
+          continue;
+        } catch {
+          break;
+        }
+      }
+      break;
+    }
+
+    const events = response.events || [];
+    for (const event of events) {
+      try {
+        if (!event.topic || event.topic.length < 1) continue;
+        const kind = StellarSdk.scValToNative(event.topic[0]) as string;
+
+        if (kind === "deposit" && !refs.depositTx) {
+          const dataMap = StellarSdk.scValToNative(event.value) as Record<
+            string,
+            unknown
+          >;
+          if (dataMap && typeof dataMap === "object" && "commitment" in dataMap) {
+            const hex = Buffer.from(dataMap.commitment as Uint8Array)
+              .toString("hex")
+              .toLowerCase();
+            if (hex === wantCommitment) {
+              refs.depositTx = {
+                hash: event.txHash,
+                at: event.ledgerClosedAt,
+              };
+            }
+          }
+        } else if (kind === "withdraw" && !refs.withdrawTx) {
+          const val = StellarSdk.scValToNative(event.value);
+          const hex = Buffer.from(val as Uint8Array)
+            .toString("hex")
+            .toLowerCase();
+          if (hex === wantNullifier) {
+            refs.withdrawTx = { hash: event.txHash, at: event.ledgerClosedAt };
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (events.length < 100) {
+      hasMore = false;
+    } else {
+      cursor = events[events.length - 1].id;
+    }
+  }
+
+  return refs;
+}
+
 export async function syncDepositsFromChain(
   poolId?: string,
 ): Promise<number> {
