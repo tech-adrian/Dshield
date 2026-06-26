@@ -1,551 +1,482 @@
 "use client";
 
 import { useState } from "react";
-import { useWallet } from "@/components/WalletProvider";
+import { getNotes, saveNoteIfNew, type ShieldedNote } from "@/lib/notes";
 import {
-  POOL_CONTRACT_ID,
-  COMPLIANCE_CONTRACT_ID,
-  buildContractCall,
-  submitTransaction,
-  queryContract,
-} from "@/lib/stellar";
-import { getNotes, type ShieldedNote } from "@/lib/notes";
-import { getAllCommitments } from "@/lib/deposits";
-import { getKyc, saveKyc, type KycRecord } from "@/lib/kyc";
-import { poseidon2Hash, buildMerkleTree } from "@/lib/poseidon2";
-import { generateRandomField } from "@/lib/notes";
-import {
-  syncDepositsFromChain,
-  fetchCommitmentsFromChain,
-} from "@/lib/indexer";
-import { proveCompliance, proveDisclosure } from "@/lib/prover";
-import {
-  TOKEN_SYMBOL,
-  stroopsToUsdc,
-  usdcToStroops,
-  truncateMiddle,
-} from "@/lib/format";
-import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
+  buildComplianceReport,
+  formatReportText,
+  type ComplianceReport,
+} from "@/lib/report";
+import { explorerTxUrl, explorerContractUrl } from "@/lib/explorer";
+import { truncateMiddle } from "@/lib/format";
+import { PageShell, PageHeader } from "@/components/ui/Page";
 import { Card } from "@/components/ui/Card";
+import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Input";
 import { SelectButton } from "@/components/ui/SelectButton";
 import { StatusMessage } from "@/components/ui/StatusMessage";
-import { ProgressSteps } from "@/components/ui/ProgressSteps";
-import * as StellarSdk from "@stellar/stellar-sdk";
+import { NoteImport } from "@/components/ui/NoteImport";
 
-type ComplianceStep =
-  | "idle"
-  | "registering_kyc"
-  | "building_tree"
-  | "generating_proof"
-  | "signing"
-  | "submitting"
-  | "done";
+type Mode = "generate" | "verify";
 
-const STEP_LABELS: Record<ComplianceStep, string> = {
-  idle: "",
-  registering_kyc: "Registering KYC on-chain...",
-  building_tree: "Building Merkle tree...",
-  generating_proof: "Generating compliance proof (this may take a minute)...",
-  signing: "Signing transaction...",
-  submitting: "Submitting transaction...",
-  done: "Compliance verified!",
-};
-
-const PROGRESS_STEPS = [
-  "registering_kyc",
-  "building_tree",
-  "generating_proof",
-  "signing",
-  "submitting",
-] as const;
+// What a note-based report proves vs. what it never discloses. Drives the
+// explainer so the privacy boundary is explicit.
+const PROVES = [
+  "The deposit exists in the pool (and its leaf index)",
+  "Whether the note has been withdrawn (nullifier spent)",
+  "The exact deposit & withdrawal transactions on-chain",
+  "That the note is internally consistent (commitment matches)",
+];
+const NEVER = [
+  "The amount / denomination",
+  "The depositor or recipient address",
+  "Your identity — no KYC, no account login",
+  "Any of your other notes or balances",
+];
 
 export default function CompliancePage() {
-  const { address, signTransaction } = useWallet();
-  const [status, setStatus] = useState("");
-  const [step, setStep] = useState<ComplianceStep>("idle");
-  const [isLoading, setIsLoading] = useState(false);
-
+  const [mode, setMode] = useState<Mode>("generate");
   const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
-  const [auditorKey, setAuditorKey] = useState("");
-  const [disclosedAmount, setDisclosedAmount] = useState("");
-  const [disclosureMode, setDisclosureMode] = useState<"exact" | "threshold">(
-    "exact",
-  );
-  const [threshold, setThreshold] = useState("");
-  const [kyc, setKyc] = useState<KycRecord | null>(() => getKyc());
+  const [report, setReport] = useState<ComplianceReport | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [status, setStatus] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [showGuide, setShowGuide] = useState(true);
 
-  const allNotes =
-    typeof window !== "undefined"
-      ? getNotes().filter((n) => !n.spent)
-      : [];
+  const notes = typeof window !== "undefined" ? getNotes() : [];
 
-  async function handleSetupKyc() {
-    if (!address || !COMPLIANCE_CONTRACT_ID) return;
+  function pickNote(note: ShieldedNote, persist: boolean) {
+    if (persist) saveNoteIfNew(note);
+    setSelectedNote(note);
+    setReport(null);
+    setStatus("");
+  }
+
+  async function handleRun() {
+    if (!selectedNote) return;
     setIsLoading(true);
     setStatus("");
-
+    setReport(null);
     try {
-      setStep("registering_kyc");
-
-      const preimage = generateRandomField();
-      const kycHash = await poseidon2Hash(
-        preimage.startsWith("0x") ? preimage : "0x" + preimage,
-        "0",
-      );
-      const kycHashClean = kycHash.replace(/^0x/, "");
-
-      const res = await fetch("/api/register-kyc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kycHash: kycHashClean }),
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        throw new Error(body.error || `KYC registration failed (${res.status})`);
+      const r = await buildComplianceReport(selectedNote);
+      setReport(r);
+      if (!r.depositConfirmed) {
+        setStatus(
+          "Warning: this commitment was not found in the pool's on-chain commitment list. The note may be from a different / redeployed pool.",
+        );
       }
-
-      const record: KycRecord = {
-        preimage,
-        hash: kycHashClean,
-        registeredOnChain: true,
-        createdAt: Date.now(),
-      };
-      saveKyc(record);
-      setKyc(record);
-
-      setStep("idle");
-      setStatus(`KYC registered! TX: ${body.hash.slice(0, 12)}...`);
     } catch (err) {
-      setStep("idle");
-      const msg = err instanceof Error ? err.message : JSON.stringify(err);
-      console.error("KYC registration error:", err);
+      const msg = err instanceof Error ? err.message : String(err);
       setStatus(`Error: ${msg}`);
     } finally {
       setIsLoading(false);
     }
   }
 
-  async function handleVerifyCompliance() {
-    if (!address || !selectedNote || !kyc) return;
-    if (!POOL_CONTRACT_ID || !COMPLIANCE_CONTRACT_ID) {
-      setStatus("Error: Contract IDs not configured.");
-      return;
-    }
-    if (!auditorKey) {
-      setStatus("Error: Enter an auditor key.");
-      return;
-    }
-
-    const noteAmount = selectedNote.amount || "0";
-    const noteUsdc = stroopsToUsdc(noteAmount);
-
-    if (disclosureMode === "exact") {
-      if (!disclosedAmount) {
-        setStatus("Error: Enter the amount to disclose.");
-        return;
-      }
-      const disclosedStroops = usdcToStroops(disclosedAmount);
-      if (disclosedStroops !== noteAmount) {
-        setStatus(
-          `Error: Disclosed amount must match the note's amount (${noteUsdc} ${TOKEN_SYMBOL}). ` +
-            "The circuit enforces amount == disclosed_amount.",
-        );
-        return;
-      }
-    } else {
-      if (!threshold) {
-        setStatus("Error: Enter a threshold amount.");
-        return;
-      }
-      const thresholdVal = parseFloat(threshold);
-      const amountVal = parseFloat(noteUsdc);
-      if (isNaN(thresholdVal) || thresholdVal <= 0) {
-        setStatus("Error: Threshold must be a positive number.");
-        return;
-      }
-      if (thresholdVal > amountVal) {
-        setStatus(
-          `Error: Threshold (${threshold} ${TOKEN_SYMBOL}) exceeds note balance (${noteUsdc} ${TOKEN_SYMBOL}). ` +
-            "The proof would fail.",
-        );
-        return;
-      }
-    }
-
-    setIsLoading(true);
-    setStatus("");
-
-    try {
-      setStep("building_tree");
-
-      const isRegistered = await queryContract(
-        COMPLIANCE_CONTRACT_ID,
-        "is_kyc_registered",
-        [
-          StellarSdk.xdr.ScVal.scvBytes(
-            Buffer.from(kyc.hash, "hex"),
-          ),
-        ],
-      );
-      if (!isRegistered || StellarSdk.scValToNative(isRegistered) !== true) {
-        setStep("idle");
-        setStatus("Error: KYC hash is not registered on-chain. Register first.");
-        setIsLoading(false);
-        return;
-      }
-
-      const compliancePoolId = selectedNote.poolId || POOL_CONTRACT_ID;
-      const rootVal = await queryContract(compliancePoolId, "get_root");
-      if (!rootVal) {
-        setStep("idle");
-        setStatus("Error: No Merkle root found. Has any deposit been made?");
-        setIsLoading(false);
-        return;
-      }
-      const rootBytes = StellarSdk.scValToNative(rootVal) as Buffer;
-      const onChainRoot = "0x" + Buffer.from(rootBytes).toString("hex");
-
-      // Rebuild the tree from the authoritative on-chain commitment list
-      // (get_commitments) — the same retention-independent path the withdraw
-      // flow uses. Fall back to event scan + local cache only for older pools
-      // that predate the get_commitments view.
-      const poolKey = selectedNote.poolId || POOL_CONTRACT_ID;
-      const chainCommitments = await fetchCommitmentsFromChain(compliancePoolId);
-      let commitments: string[];
-      if (chainCommitments && chainCommitments.length > 0) {
-        commitments = chainCommitments;
-      } else {
-        await syncDepositsFromChain(compliancePoolId);
-        commitments = getAllCommitments(poolKey);
-        if (commitments.length === 0) {
-          setStep("idle");
-          setStatus("Error: No deposits found on-chain or locally.");
-          setIsLoading(false);
-          return;
-        }
-      }
-
-      const merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
-
-      if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
-        setStep("idle");
-        setStatus(
-          `Error: Merkle root mismatch (${commitments.length} leaves). ` +
-            "If this pool predates the get_commitments upgrade, redeploy and re-deposit.",
-        );
-        setIsLoading(false);
-        return;
-      }
-
-      setStep("generating_proof");
-
-      let proof: string;
-      let publicInputs: string;
-      try {
-        if (disclosureMode === "exact") {
-          const result = await proveCompliance({
-            kycPreimage: kyc.preimage,
-            nullifier: selectedNote.nullifier,
-            secret: selectedNote.secret,
-            amount: noteAmount,
-            auditorKey,
-            merkleRoot: onChainRoot,
-            kycHash: "0x" + kyc.hash,
-            disclosedAmount: usdcToStroops(disclosedAmount),
-            pathSiblings: merkle.pathSiblings,
-            pathBits: merkle.pathBits,
-          });
-          proof = result.proof;
-          publicInputs = result.publicInputs;
-        } else {
-          const result = await proveDisclosure({
-            kycPreimage: kyc.preimage,
-            nullifier: selectedNote.nullifier,
-            secret: selectedNote.secret,
-            amount: noteAmount,
-            auditorKey,
-            merkleRoot: onChainRoot,
-            kycHash: "0x" + kyc.hash,
-            threshold: usdcToStroops(threshold),
-            pathSiblings: merkle.pathSiblings,
-            pathBits: merkle.pathBits,
-          });
-          proof = result.proof;
-          publicInputs = result.publicInputs;
-        }
-      } catch (proveErr) {
-        setStep("idle");
-        const msg =
-          proveErr instanceof Error ? proveErr.message : String(proveErr);
-        setStatus(`Error generating proof: ${msg}`);
-        setIsLoading(false);
-        return;
-      }
-
-      const contractMethod =
-        disclosureMode === "exact" ? "verify_compliance" : "verify_disclosure";
-
-      setStep("signing");
-      const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(publicInputs, "hex"),
-      );
-      const proofScVal = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(proof, "hex"),
-      );
-
-      const tx = await buildContractCall(
-        COMPLIANCE_CONTRACT_ID,
-        contractMethod,
-        [publicInputsScVal, proofScVal],
-        address,
-      );
-
-      const signedXdr = await signTransaction(tx.toXDR());
-
-      setStep("submitting");
-      const txHash = await submitTransaction(signedXdr);
-
-      setStep("done");
-      if (disclosureMode === "exact") {
-        setStatus(`Compliance verified! TX: ${txHash.slice(0, 12)}...`);
-      } else {
-        setStatus(
-          `Disclosure verified! Proved balance >= ${threshold} ${TOKEN_SYMBOL} to auditor. TX: ${txHash.slice(0, 12)}...`,
-        );
-      }
-    } catch (err) {
-      setStep("idle");
-      const msg = err instanceof Error ? err.message : JSON.stringify(err);
-      console.error("Compliance error:", err);
-      setStatus(`Error: ${msg}`);
-    } finally {
-      setIsLoading(false);
-    }
+  function copyNote() {
+    if (!report) return;
+    void navigator.clipboard?.writeText(report.note);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   }
 
-  if (!address) {
-    return (
-      <ConnectGate
-        title="Compliance"
-        prompt="Connect your wallet to verify compliance."
-      />
-    );
+  function downloadPdf() {
+    if (!report) return;
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(reportHtml(report));
+    w.document.close();
+    w.focus();
+    w.print();
+  }
+
+  function downloadTxt() {
+    if (!report) return;
+    const blob = new Blob([formatReportText(report)], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dshield-compliance-${report.commitment.slice(2, 14)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
     <PageShell>
       <PageHeader
-        title="Selective Disclosure"
-        description="Prove KYC compliance and disclose specific transaction details to an auditor without revealing your full identity or transaction history."
+        title="Compliance Report"
+        description="Generate a cryptographically verifiable report from a shielded Note. It attests that funds were deposited and whether they were later withdrawn — provable by anyone holding the Note, with no identity, KYC, or amount disclosed. Share it as a PDF; the other party pastes the Note here to reproduce the exact same report from public chain data."
       />
 
-      <div className="mt-8 space-y-6">
-        {/* Step 1: KYC Registration */}
-        <Card>
-          <h3 className="text-sm font-medium text-zinc-400">
-            Step 1: KYC Registration
-          </h3>
-          {kyc?.registeredOnChain ? (
-            <div className="mt-3">
-              <div className="flex items-center gap-2 text-sm text-green-400">
-                <span>KYC Registered</span>
-              </div>
-              <div className="mt-2 break-all font-mono text-xs text-zinc-500">
-                Hash: {truncateMiddle(kyc.hash, 16, 16)}
-              </div>
-            </div>
-          ) : (
-            <div className="mt-3">
-              <p className="mb-3 text-sm text-zinc-500">
-                Generate and register a KYC hash on-chain. A random preimage is
-                created and stored locally - only you know it.
-              </p>
-              <Button
-                fullWidth
-                variant="outline"
-                onClick={handleSetupKyc}
-                disabled={isLoading || !COMPLIANCE_CONTRACT_ID}
-              >
-                {isLoading && step === "registering_kyc"
-                  ? "Registering..."
-                  : "Register KYC"}
-              </Button>
-            </div>
-          )}
-        </Card>
-
-        {/* Step 2: Select Note */}
-        <Card>
-          <h3 className="text-sm font-medium text-zinc-400">
-            Step 2: Select a Note ({allNotes.length} available)
-          </h3>
-          {allNotes.length === 0 ? (
-            <p className="mt-3 text-sm text-zinc-500">
-              No active notes. Deposit funds first.
+      {/* Explainer */}
+      <div className="mt-8">
+        <button
+          type="button"
+          onClick={() => setShowGuide((v) => !v)}
+          className="flex w-full items-center justify-between text-left"
+        >
+          <h2 className="text-sm font-semibold text-white">
+            How the compliance tool works
+          </h2>
+          <span className="text-xs text-zinc-500 hover:text-zinc-300">
+            {showGuide ? "Hide" : "Show"}
+          </span>
+        </button>
+        {showGuide && (
+          <Card border="brand" className="mt-4">
+            <p className="text-sm leading-relaxed text-zinc-300">
+              Every deposit creates a{" "}
+              <span className="font-medium text-white">Note</span> — the same
+              secret you use to withdraw. From that Note alone, this tool
+              recomputes your commitment and nullifier and reads the pool&apos;s
+              authoritative on-chain views to build a report. Because it&apos;s
+              all derived from public data, anyone you share the Note with can
+              reproduce the identical report — no auditor or trust required.
             </p>
-          ) : (
-            <div className="mt-3 space-y-2">
-              {allNotes.map((note) => (
-                <SelectButton
-                  key={note.commitment}
-                  selected={selectedNote?.commitment === note.commitment}
-                  onClick={() => {
-                    if (!isLoading) {
-                      setSelectedNote(note);
-                      setDisclosedAmount(stroopsToUsdc(note.amount || "0"));
-                    }
-                  }}
-                  disabled={isLoading}
-                  className="w-full border-zinc-800 text-left hover:border-zinc-700"
-                >
-                  <div className="font-mono text-xs text-zinc-300">
-                    {truncateMiddle(note.commitment, 16, 16)}
-                  </div>
-                  <div className="mt-1 flex justify-between text-xs text-zinc-500">
-                    <span>
-                      {stroopsToUsdc(note.amount || "0")} {TOKEN_SYMBOL}
-                    </span>
-                    <span>Leaf #{note.leafIndex}</span>
-                  </div>
-                </SelectButton>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        {/* Step 3: Disclosure Details */}
-        {selectedNote && kyc?.registeredOnChain && (
-          <Card>
-            <h3 className="mb-3 text-sm font-medium text-zinc-400">
-              Step 3: Disclosure Details
-            </h3>
-            <div className="space-y-4">
-              {/* Mode toggle */}
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="mb-2 block text-xs text-zinc-500">
-                  Disclosure Mode
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <SelectButton
-                    selected={disclosureMode === "exact"}
-                    onClick={() => setDisclosureMode("exact")}
-                    disabled={isLoading}
-                    className="text-center font-medium"
-                  >
-                    Exact Amount
-                  </SelectButton>
-                  <SelectButton
-                    selected={disclosureMode === "threshold"}
-                    tone="accent"
-                    onClick={() => setDisclosureMode("threshold")}
-                    disabled={isLoading}
-                    className="text-center font-medium"
-                  >
-                    Balance Threshold
-                  </SelectButton>
-                </div>
-                <p className="mt-2 text-xs text-zinc-600">
-                  {disclosureMode === "exact"
-                    ? "Reveal the exact amount to the auditor."
-                    : "Prove your balance meets a minimum without revealing the exact amount."}
-                </p>
+                <h3 className="text-xs font-semibold tracking-wide text-green-400 uppercase">
+                  What the report proves
+                </h3>
+                <ul className="mt-2 space-y-1.5">
+                  {PROVES.map((t) => (
+                    <li key={t} className="flex gap-2 text-xs text-zinc-400">
+                      <span className="text-green-500">+</span>
+                      {t}
+                    </li>
+                  ))}
+                </ul>
               </div>
-
-              {/* Auditor key */}
-              <Input
-                label="Auditor Key (field element)"
-                mono
-                value={auditorKey}
-                onChange={(e) => setAuditorKey(e.target.value.trim())}
-                placeholder="e.g. 42 or 0xabcd..."
-                hint="The auditor's public identifier. Binds the proof to this specific auditor."
-              />
-
-              {/* Exact mode: disclosed amount */}
-              {disclosureMode === "exact" && (
-                <Input
-                  type="number"
-                  label={`Disclosed Amount (${TOKEN_SYMBOL})`}
-                  mono
-                  value={disclosedAmount}
-                  onChange={(e) => setDisclosedAmount(e.target.value.trim())}
-                  placeholder="10"
-                  step="any"
-                  hint={
-                    <>
-                      Must match the note&apos;s actual amount (
-                      {stroopsToUsdc(selectedNote.amount || "0")} {TOKEN_SYMBOL}
-                      ). The circuit enforces this equality.
-                    </>
-                  }
-                />
-              )}
-
-              {/* Threshold mode: minimum balance */}
-              {disclosureMode === "threshold" && (
-                <Input
-                  type="number"
-                  label={`Minimum Balance (${TOKEN_SYMBOL})`}
-                  mono
-                  value={threshold}
-                  onChange={(e) => setThreshold(e.target.value.trim())}
-                  placeholder={`e.g. ${Number(stroopsToUsdc(selectedNote.amount || "0")) / 2}`}
-                  step="any"
-                  className="border-brand-800/50 focus-visible:border-brand-500"
-                  hint={
-                    <>
-                      Prove your balance is at least this amount. The auditor
-                      learns the threshold was met but not your exact balance.
-                      Note balance: {stroopsToUsdc(selectedNote.amount || "0")}{" "}
-                      {TOKEN_SYMBOL}.
-                    </>
-                  }
-                />
-              )}
+              <div>
+                <h3 className="text-xs font-semibold tracking-wide text-zinc-500 uppercase">
+                  What it never reveals
+                </h3>
+                <ul className="mt-2 space-y-1.5">
+                  {NEVER.map((t) => (
+                    <li key={t} className="flex gap-2 text-xs text-zinc-400">
+                      <span className="text-zinc-600">–</span>
+                      {t}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             </div>
           </Card>
         )}
+      </div>
 
-        {/* Submit Button */}
-        {selectedNote && kyc?.registeredOnChain && (
-          <Button
-            fullWidth
-            size="lg"
-            variant={disclosureMode === "threshold" ? "accent" : "primary"}
-            onClick={handleVerifyCompliance}
-            disabled={
-              isLoading ||
-              !auditorKey ||
-              (disclosureMode === "exact" ? !disclosedAmount : !threshold)
-            }
-          >
+      {/* Mode toggle */}
+      <div className="mt-8 grid grid-cols-2 gap-2">
+        <SelectButton
+          selected={mode === "generate"}
+          onClick={() => {
+            setMode("generate");
+            setReport(null);
+            setSelectedNote(null);
+          }}
+          disabled={isLoading}
+          className="text-center font-medium"
+        >
+          Generate Report
+        </SelectButton>
+        <SelectButton
+          selected={mode === "verify"}
+          onClick={() => {
+            setMode("verify");
+            setReport(null);
+            setSelectedNote(null);
+          }}
+          disabled={isLoading}
+          className="text-center font-medium"
+        >
+          Verify a Report
+        </SelectButton>
+      </div>
+
+      <div className="mt-6 space-y-6">
+        {mode === "generate" ? (
+          <>
+            <Card>
+              <h3 className="text-sm font-medium text-zinc-400">
+                Select one of your Notes ({notes.length})
+              </h3>
+              {notes.length === 0 ? (
+                <p className="mt-3 text-sm text-zinc-500">
+                  No notes on this device. Deposit first, or paste a Note below.
+                </p>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {notes.map((note) => (
+                    <SelectButton
+                      key={note.commitment}
+                      selected={selectedNote?.commitment === note.commitment}
+                      onClick={() => !isLoading && pickNote(note, false)}
+                      disabled={isLoading}
+                      className="w-full border-zinc-800 text-left hover:border-zinc-700"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs text-zinc-300">
+                          {truncateMiddle(note.commitment, 16, 16)}
+                        </span>
+                        <Badge tone={note.spent ? "blue" : "green"}>
+                          {note.spent ? "Withdrawn" : "In pool"}
+                        </Badge>
+                      </div>
+                      <div className="mt-1 text-xs text-zinc-500">
+                        Leaf #{note.leafIndex}
+                      </div>
+                    </SelectButton>
+                  ))}
+                </div>
+              )}
+            </Card>
+            <NoteImport
+              disabled={isLoading}
+              title="Or paste a Shielded Note"
+              onImport={(note) => pickNote(note, true)}
+            />
+          </>
+        ) : (
+          <NoteImport
+            disabled={isLoading}
+            title="Paste the Note from the report"
+            onImport={(note) => pickNote(note, false)}
+          />
+        )}
+
+        {selectedNote && (
+          <Button fullWidth size="lg" onClick={handleRun} disabled={isLoading}>
             {isLoading
-              ? "Processing..."
-              : disclosureMode === "exact"
-                ? "Generate Proof & Verify Compliance"
-                : "Generate Threshold Proof & Verify"}
+              ? "Reading chain..."
+              : mode === "generate"
+                ? "Generate Report"
+                : "Verify Report"}
           </Button>
         )}
 
-        {/* Progress */}
-        {step !== "idle" && step !== "done" && (
-          <ProgressSteps
-            label={STEP_LABELS[step]}
-            steps={PROGRESS_STEPS}
-            current={step}
-          />
+        {report && (
+          <Card border="brand">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white">
+                {mode === "verify"
+                  ? "Independently verified from chain"
+                  : "Compliance Report"}
+              </h3>
+              <Badge tone={report.integrityOk ? "green" : "zinc"}>
+                {report.integrityOk ? "Note valid" : "Note mismatch"}
+              </Badge>
+            </div>
+
+            <dl className="mt-4 space-y-3 text-sm">
+              <ReportRow label="Network" value={report.network} />
+              <ReportRow
+                label="Deposit"
+                value={
+                  report.depositConfirmed ? (
+                    <span className="text-green-400">
+                      Confirmed on-chain (leaf #{report.leafIndex})
+                    </span>
+                  ) : (
+                    <span className="text-yellow-400">Not found on-chain</span>
+                  )
+                }
+              />
+              <ReportRow
+                label="Status"
+                value={
+                  report.withdrawn ? (
+                    <span className="text-blue-400">
+                      Withdrawn (nullifier spent)
+                    </span>
+                  ) : (
+                    <span className="text-zinc-300">In pool (unspent)</span>
+                  )
+                }
+              />
+              <ReportRow
+                label="Commitment"
+                value={
+                  <span className="font-mono text-xs break-all text-zinc-300">
+                    {report.commitment}
+                  </span>
+                }
+              />
+              <ReportRow
+                label="Nullifier hash"
+                value={
+                  <span className="font-mono text-xs break-all text-zinc-300">
+                    {report.nullifierHash}
+                  </span>
+                }
+              />
+              <ReportRow
+                label="Pool contract"
+                value={<ExplorerLink url={explorerContractUrl(report.poolId)} text={report.poolId} mono />}
+              />
+              {report.depositTx && (
+                <ReportRow
+                  label="Deposit tx"
+                  value={
+                    <ExplorerLink
+                      url={explorerTxUrl(report.depositTx.hash)}
+                      text={report.depositTx.hash}
+                      sub={report.depositTx.at}
+                      mono
+                    />
+                  }
+                />
+              )}
+              {report.withdrawTx && (
+                <ReportRow
+                  label="Withdraw tx"
+                  value={
+                    <ExplorerLink
+                      url={explorerTxUrl(report.withdrawTx.hash)}
+                      text={report.withdrawTx.hash}
+                      sub={report.withdrawTx.at}
+                      mono
+                    />
+                  }
+                />
+              )}
+            </dl>
+
+            <div className="mt-5 rounded-xl bg-zinc-800/80 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-zinc-500">
+                  Shielded Note (embedded for re-verification)
+                </p>
+                <button
+                  type="button"
+                  onClick={copyNote}
+                  className="shrink-0 text-xs font-medium text-brand-400 hover:text-brand-300"
+                >
+                  {copied ? "Copied!" : "Copy"}
+                </button>
+              </div>
+              <p className="mt-1.5 font-mono text-xs break-all text-zinc-300">
+                {report.note}
+              </p>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <Button variant="primary" onClick={downloadPdf}>
+                Download PDF
+              </Button>
+              <Button variant="outline" onClick={downloadTxt}>
+                Download .txt
+              </Button>
+            </div>
+            <p className="mt-3 text-xs text-zinc-600">
+              The exported report carries the Note. To verify, switch to the{" "}
+              <span className="text-zinc-400">Verify a Report</span> tab and paste
+              it — the report regenerates from chain and must match.
+            </p>
+          </Card>
         )}
 
-        {/* Status */}
         {status && (
-          <StatusMessage
-            message={status}
-            successHints={["verified", "registered"]}
-          />
+          <StatusMessage message={status} successHints={["verified"]} />
         )}
       </div>
     </PageShell>
   );
+}
+
+function ReportRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5 sm:flex-row sm:justify-between sm:gap-4">
+      <dt className="shrink-0 text-zinc-500">{label}</dt>
+      <dd className="min-w-0 text-right sm:text-right">{value}</dd>
+    </div>
+  );
+}
+
+function ExplorerLink({
+  url,
+  text,
+  sub,
+  mono,
+}: {
+  url: string | null;
+  text: string;
+  sub?: string;
+  mono?: boolean;
+}) {
+  const body = (
+    <span className={mono ? "font-mono text-xs break-all" : "break-all"}>
+      {text}
+    </span>
+  );
+  return (
+    <span className="inline-block">
+      {url ? (
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-brand-400 hover:text-brand-300"
+        >
+          {body}
+        </a>
+      ) : (
+        <span className="text-zinc-300">{body}</span>
+      )}
+      {sub && <span className="block text-xs text-zinc-600">{sub}</span>}
+    </span>
+  );
+}
+
+// Self-contained printable HTML for the browser's "Save as PDF". Kept inline so
+// the PDF needs no extra dependency. Values are hex/addresses/ISO timestamps.
+function reportHtml(r: ComplianceReport): string {
+  const row = (k: string, v: string) =>
+    `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
+  const txUrl = (h: string) => explorerTxUrl(h);
+  const link = (h: string) => {
+    const u = txUrl(h);
+    return u ? `<a href="${u}">${h}</a>` : h;
+  };
+  const rows = [
+    row("Generated", new Date(r.generatedAt).toISOString()),
+    row("Network", r.network),
+    row("Note integrity", r.integrityOk ? "OK — commitment matches" : "MISMATCH"),
+    row(
+      "Deposit",
+      r.depositConfirmed
+        ? `Confirmed on-chain (leaf #${r.leafIndex})`
+        : "Not found on-chain",
+    ),
+    row("Status", r.withdrawn ? "Withdrawn (nullifier spent)" : "In pool (unspent)"),
+    row("Commitment", r.commitment),
+    row("Nullifier hash", r.nullifierHash),
+    row("Pool contract", r.poolId),
+    r.depositTx ? row("Deposit tx", link(r.depositTx.hash)) : "",
+    r.withdrawTx ? row("Withdraw tx", link(r.withdrawTx.hash)) : "",
+  ].join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>DShield Compliance Report</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 24px;color:#18181b}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:#71717a;font-size:13px;margin:0 0 24px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td{padding:8px 0;border-bottom:1px solid #e4e4e7;vertical-align:top}
+  td.k{color:#71717a;width:160px}
+  td.v{font-family:ui-monospace,monospace;word-break:break-all}
+  .note{margin-top:24px;padding:12px;background:#f4f4f5;border-radius:8px;font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
+  .label{font-size:11px;color:#71717a;margin-bottom:6px}
+  a{color:#2563eb}
+</style></head><body>
+<h1>DShield Compliance Report</h1>
+<p class="sub">Verifiable from the embedded Note against public on-chain data. No identity, KYC, or amount disclosed.</p>
+<table>${rows}</table>
+<div class="label" style="margin-top:24px">Shielded Note — paste into the Compliance Tool's “Verify a Report” tab to reproduce this report</div>
+<div class="note">${r.note}</div>
+</body></html>`;
 }
