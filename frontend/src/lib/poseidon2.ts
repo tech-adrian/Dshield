@@ -10,10 +10,26 @@ async function getHasher(): Promise<InstanceType<typeof Noir>> {
   return noirInstance;
 }
 
+/**
+ * Left-pad a field element to a canonical 32-byte (64 hex char) 0x-prefixed
+ * string. The Noir hasher returns field values WITHOUT leading-zero padding
+ * (e.g. a root whose top byte is 0x00 comes back as "0x301b…" not "0x00301b…").
+ * On-chain the same value is always a full 32-byte BytesN<32>, so comparing the
+ * two as raw strings — or slicing them into a Buffer for an ScVal — silently
+ * breaks (~1/256 of values) unless both sides are normalized to 32 bytes.
+ */
+export function normalizeField(v: string): string {
+  const hex = v.replace(/^0x/, "").toLowerCase();
+  if (hex.length > 64) {
+    throw new Error(`field element exceeds 32 bytes: ${v}`);
+  }
+  return "0x" + hex.padStart(64, "0");
+}
+
 export async function poseidon2Hash(a: string, b: string): Promise<string> {
   const noir = await getHasher();
   const result = await noir.execute({ a, b });
-  return result.returnValue as string;
+  return normalizeField(result.returnValue as string);
 }
 
 export async function computeCommitment(
