@@ -394,8 +394,8 @@ export default function WithdrawPage() {
           onImport={(notes) => {
             const newSel = new Set(selectedCommitments);
             for (const note of notes) {
-              const isNew = saveNoteIfNew(note);
-              if (isNew) newSel.add(note.commitment);
+              saveNoteIfNew(note);
+              newSel.add(note.commitment); // always select, even if note already existed in storage
             }
             setSelectedCommitments(newSel);
             refresh();
