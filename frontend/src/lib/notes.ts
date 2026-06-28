@@ -92,6 +92,14 @@ export function parseNote(serialized: string): ShieldedNote | null {
   };
 }
 
+export function generateNoteLink(note: ShieldedNote): string {
+  const base =
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "https://dshield.vercel.app";
+  return `${base}/withdraw#note=${encodeURIComponent(serializeNote(note))}`;
+}
+
 export function generateRandomField(): string {
   const bytes = new Uint8Array(31);
   crypto.getRandomValues(bytes);

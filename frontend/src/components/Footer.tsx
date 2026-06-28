@@ -25,7 +25,7 @@ const linkClass =
 export function Footer() {
   return (
     <footer className="mt-12 px-3 pb-3 sm:px-4 sm:pb-4">
-      <div className="mx-auto max-w-5xl rounded-2xl border border-zinc-800/80 bg-zinc-900/40 px-5 py-8 backdrop-blur-sm sm:px-8 sm:py-10">
+      <div className="aurora-border mx-auto max-w-5xl rounded-2xl border border-zinc-800/80 bg-zinc-900/40 px-5 py-8 backdrop-blur-sm sm:px-8 sm:py-10">
         <div className="grid gap-6 sm:grid-cols-3 sm:gap-8">
           <div>
             <div className="flex items-center gap-2">
