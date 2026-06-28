@@ -186,6 +186,82 @@ fn verify_proof(
         .map_err(|_| PoolError::VerificationFailed)
 }
 
+fn load_token_and_amount(env: &Env) -> Result<(Address, i128), PoolError> {
+    let token_addr: Address = env
+        .storage()
+        .instance()
+        .get(&key_token())
+        .ok_or(PoolError::TokenNotSet)?;
+    let amount: i128 = env
+        .storage()
+        .instance()
+        .get(&key_deposit_amount())
+        .ok_or(PoolError::TokenNotSet)?;
+    Ok((token_addr, amount))
+}
+
+/// Persists a single commitment: marks it present, stores it keyed by its leaf
+/// index (so clients can rebuild the tree), and emits the deposit event.
+fn record_commitment(env: &Env, idx: u32, commitment: &BytesN<32>) {
+    let cm_key = (key_commitment_prefix(), commitment.clone());
+    env.storage().persistent().set(&cm_key, &true);
+    bump_persistent(env, &cm_key);
+    let ci_key = (key_commitment_by_index_prefix(), idx);
+    env.storage().persistent().set(&ci_key, commitment);
+    bump_persistent(env, &ci_key);
+    DepositEvent {
+        idx: &idx,
+        commitment,
+    }
+    .publish(env);
+}
+
+/// Inserts `commitment` at `index` into the incremental Merkle tree, updating
+/// the stored frontier, and returns the new root. Identical leaf-by-leaf
+/// behaviour to a sequence of single deposits, so reconstructed roots match.
+fn insert_commitment(
+    env: &Env,
+    zeroes: &Vec<BytesN<32>>,
+    index: u32,
+    commitment: &BytesN<32>,
+) -> BytesN<32> {
+    let mut cur = commitment.clone();
+    let mut i = 0u32;
+    while i < TREE_DEPTH {
+        let bit = (index >> i) & 1;
+        let fk = (key_frontier_prefix(), i);
+        if bit == 0 {
+            env.storage().instance().set(&fk, &cur);
+            cur = poseidon2_hash2(env, &cur, &zeroes[i as usize]);
+        } else {
+            let left: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&fk)
+                .unwrap_or_else(|| zeroes[i as usize].clone());
+            cur = poseidon2_hash2(env, &left, &cur);
+        }
+        i += 1;
+    }
+    cur
+}
+
+/// Records `root` as the current root and appends it to the bounded root
+/// history ring used to validate withdrawal proofs against recent states.
+fn commit_root(env: &Env, root: &BytesN<32>) {
+    env.storage().instance().set(&key_root(), root);
+    let rh_idx: u32 = env
+        .storage()
+        .instance()
+        .get(&key_root_history_index())
+        .unwrap_or(0u32);
+    let rh_key = (key_root_history_prefix(), rh_idx % ROOT_HISTORY_SIZE);
+    env.storage().instance().set(&rh_key, root);
+    env.storage()
+        .instance()
+        .set(&key_root_history_index(), &(rh_idx + 1));
+}
+
 #[contractimpl]
 impl PoolContract {
     pub fn __constructor(
@@ -214,21 +290,10 @@ impl PoolContract {
             return Err(PoolError::CommitmentExists);
         }
 
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&key_token())
-            .ok_or(PoolError::TokenNotSet)?;
-        let amount: i128 = env
-            .storage()
-            .instance()
-            .get(&key_deposit_amount())
-            .ok_or(PoolError::TokenNotSet)?;
-
+        let (token_addr, amount) = load_token_and_amount(&env)?;
         let contract_addr = env.current_contract_address();
         token::Client::new(&env, &token_addr).transfer(&depositor, &contract_addr, &amount);
 
-        let zeroes = zeroes_for_tree(&env);
         let mut next_index: u32 = env
             .storage()
             .instance()
@@ -239,59 +304,78 @@ impl PoolContract {
         }
 
         let idx = next_index;
-        env.storage().persistent().set(&cm_key, &true);
-        bump_persistent(&env, &cm_key);
-        // Store the commitment keyed by its leaf index so clients can
-        // reconstruct the full Merkle tree deterministically via contract
-        // calls, without depending on RPC event retention.
-        let ci_key = (key_commitment_by_index_prefix(), idx);
-        env.storage().persistent().set(&ci_key, &commitment);
-        bump_persistent(&env, &ci_key);
-        DepositEvent {
-            idx: &idx,
-            commitment: &commitment,
-        }
-        .publish(&env);
-
-        let ins_idx = next_index;
-        let mut cur = commitment.clone();
-        let mut i = 0u32;
-        while i < TREE_DEPTH {
-            let bit = (ins_idx >> i) & 1;
-            if bit == 0 {
-                let fk = (key_frontier_prefix(), i);
-                env.storage().instance().set(&fk, &cur);
-                let z = &zeroes[i as usize];
-                cur = poseidon2_hash2(&env, &cur, z);
-            } else {
-                let fk = (key_frontier_prefix(), i);
-                let left: BytesN<32> = env
-                    .storage()
-                    .instance()
-                    .get(&fk)
-                    .unwrap_or_else(|| zeroes[i as usize].clone());
-                cur = poseidon2_hash2(&env, &left, &cur);
-            }
-            i += 1;
-        }
-
-        env.storage().instance().set(&key_root(), &cur);
-
-        let rh_idx: u32 = env
-            .storage()
-            .instance()
-            .get(&key_root_history_index())
-            .unwrap_or(0u32);
-        let rh_key = (key_root_history_prefix(), rh_idx % ROOT_HISTORY_SIZE);
-        env.storage().instance().set(&rh_key, &cur);
-        env.storage()
-            .instance()
-            .set(&key_root_history_index(), &(rh_idx + 1));
+        let zeroes = zeroes_for_tree(&env);
+        record_commitment(&env, idx, &commitment);
+        let root = insert_commitment(&env, &zeroes, idx, &commitment);
+        commit_root(&env, &root);
 
         next_index = next_index.saturating_add(1);
         env.storage().instance().set(&key_next_index(), &next_index);
 
         Ok(idx)
+    }
+
+    /// Deposit several commitments in a single transaction (one signature, one
+    /// token transfer of `deposit_amount * commitments.len()`). Each commitment
+    /// is inserted at the next sequential leaf index exactly as repeated
+    /// `deposit` calls would, so the resulting root and per-leaf indices are
+    /// identical — clients can rebuild the tree the same way. Returns the leaf
+    /// index assigned to the first commitment; the rest follow consecutively.
+    ///
+    /// The whole batch is atomic: any duplicate commitment (within the batch or
+    /// already stored) or a full tree reverts the entire transaction, so no
+    /// partial deposit or partial transfer can occur.
+    pub fn deposit_batch(
+        env: Env,
+        depositor: Address,
+        commitments: soroban_sdk::Vec<BytesN<32>>,
+    ) -> Result<u32, PoolError> {
+        depositor.require_auth();
+        bump_instance(&env);
+
+        let count = commitments.len();
+        if count == 0 {
+            return Err(PoolError::InvalidPublicInputs);
+        }
+
+        let mut next_index: u32 = env
+            .storage()
+            .instance()
+            .get(&key_next_index())
+            .unwrap_or(0u32);
+        // Reject up-front if the batch can't possibly fit, before transferring.
+        if next_index.saturating_add(count) > MAX_LEAVES {
+            return Err(PoolError::TreeFull);
+        }
+
+        let (token_addr, amount) = load_token_and_amount(&env)?;
+        let total = amount.saturating_mul(count as i128);
+        let contract_addr = env.current_contract_address();
+        token::Client::new(&env, &token_addr).transfer(&depositor, &contract_addr, &total);
+
+        let zeroes = zeroes_for_tree(&env);
+        let first_index = next_index;
+        let mut root = BytesN::from_array(&env, &[0u8; 32]);
+
+        for commitment in commitments.iter() {
+            let cm_key = (key_commitment_prefix(), commitment.clone());
+            if env.storage().persistent().has(&cm_key) {
+                return Err(PoolError::CommitmentExists);
+            }
+            let idx = next_index;
+            record_commitment(&env, idx, &commitment);
+            root = insert_commitment(&env, &zeroes, idx, &commitment);
+            next_index = next_index.saturating_add(1);
+        }
+
+        // Push a single root-history entry for the final state. Intermediate
+        // per-leaf roots are transient and never used for withdrawals (clients
+        // always rebuild from the full commitment list), so recording only the
+        // final root keeps the bounded history from churning on a big batch.
+        commit_root(&env, &root);
+        env.storage().instance().set(&key_next_index(), &next_index);
+
+        Ok(first_index)
     }
 
     pub fn withdraw(
@@ -779,6 +863,81 @@ mod tests {
         let (pool_id, _, _) = setup_with_token(&env);
         let client = PoolContractClient::new(&env, &pool_id);
         assert_eq!(client.get_commitments().len(), 0);
+    }
+
+    #[test]
+    fn test_deposit_batch_matches_sequential_deposits() {
+        // A single deposit_batch of N commitments must leave the pool in the
+        // exact same state (root, indices, balance) as N sequential single
+        // deposits — this is what lets the wallet collapse N signatures into 1
+        // without breaking the leaf-index / Merkle-root invariants.
+        let seq_env = Env::default();
+        seq_env.mock_all_auths();
+        seq_env.cost_estimate().budget().reset_unlimited();
+        let (seq_pool, seq_dep, _) = setup_with_token(&seq_env);
+        let seq = PoolContractClient::new(&seq_env, &seq_pool);
+        for seed in 1u8..=7 {
+            seq.deposit(&seq_dep, &dummy_commitment(&seq_env, seed));
+        }
+
+        let batch_env = Env::default();
+        batch_env.mock_all_auths();
+        batch_env.cost_estimate().budget().reset_unlimited();
+        let (batch_pool, batch_dep, batch_token) = setup_with_token(&batch_env);
+        let batch = PoolContractClient::new(&batch_env, &batch_pool);
+        let token = TokenClient::new(&batch_env, &batch_token);
+
+        let mut commitments = SorobanVec::new(&batch_env);
+        for seed in 1u8..=7 {
+            commitments.push_back(dummy_commitment(&batch_env, seed));
+        }
+        let first_index = batch.deposit_batch(&batch_dep, &commitments);
+
+        assert_eq!(first_index, 0);
+        assert_eq!(batch.get_next_index(), 7);
+        assert_eq!(batch.get_root().unwrap(), seq.get_root().unwrap());
+        assert_eq!(token.balance(&batch_pool), 10_000_000 * 7);
+        // Indices are sequential and the rebuilt root matches the on-chain root.
+        let commits = batch.get_commitments();
+        assert_eq!(commits.len(), 7);
+        assert_eq!(rebuild_root(&batch_env, &commits), batch.get_root().unwrap());
+    }
+
+    #[test]
+    fn test_deposit_batch_rejects_duplicate_in_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, token_addr) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+        let token = TokenClient::new(&env, &token_addr);
+        let balance_before = token.balance(&depositor);
+
+        let mut commitments = SorobanVec::new(&env);
+        commitments.push_back(dummy_commitment(&env, 1));
+        commitments.push_back(dummy_commitment(&env, 1)); // duplicate
+
+        let result = client.try_deposit_batch(&depositor, &commitments);
+        assert_eq!(result.err().unwrap().unwrap(), PoolError::CommitmentExists);
+        // Atomic: nothing inserted, no tokens moved.
+        assert_eq!(client.get_next_index(), 0);
+        assert_eq!(token.balance(&depositor), balance_before);
+    }
+
+    #[test]
+    fn test_deposit_batch_empty_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let commitments = SorobanVec::new(&env);
+        let result = client.try_deposit_batch(&depositor, &commitments);
+        assert_eq!(
+            result.err().unwrap().unwrap(),
+            PoolError::InvalidPublicInputs
+        );
     }
 
     #[test]
