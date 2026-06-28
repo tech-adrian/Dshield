@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useReducer } from "react";
 import { getNotes, saveNoteIfNew, type ShieldedNote } from "@/lib/notes";
+import { friendlyError } from "@/lib/errors";
+import { syncSpentNotes } from "@/lib/sync";
 import {
   buildComplianceReport,
   formatReportText,
@@ -14,7 +16,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { SelectButton } from "@/components/ui/SelectButton";
-import { StatusMessage } from "@/components/ui/StatusMessage";
+import { useToast } from "@/components/ui/Toast";
 import { NoteImport } from "@/components/ui/NoteImport";
 
 type Mode = "generate" | "verify";
@@ -25,7 +27,6 @@ const PROVES = [
   "The deposit exists in the pool (and its leaf index)",
   "Whether the note has been withdrawn (nullifier spent)",
   "The exact deposit & withdrawal transactions on-chain",
-  "That the note is internally consistent (commitment matches)",
 ];
 const NEVER = [
   "The amount / denomination",
@@ -39,9 +40,16 @@ export default function CompliancePage() {
   const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
   const [report, setReport] = useState<ComplianceReport | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [status, setStatus] = useState("");
+  const { toast } = useToast();
   const [copied, setCopied] = useState(false);
   const [showGuide, setShowGuide] = useState(true);
+  const [, refresh] = useReducer((x: number) => x + 1, 0);
+
+  useEffect(() => {
+    syncSpentNotes().then((n) => {
+      if (n > 0) refresh();
+    });
+  }, []);
 
   const notes = typeof window !== "undefined" ? getNotes() : [];
 
@@ -49,25 +57,23 @@ export default function CompliancePage() {
     if (persist) saveNoteIfNew(note);
     setSelectedNote(note);
     setReport(null);
-    setStatus("");
   }
 
   async function handleRun() {
     if (!selectedNote) return;
     setIsLoading(true);
-    setStatus("");
     setReport(null);
     try {
       const r = await buildComplianceReport(selectedNote);
       setReport(r);
       if (!r.depositConfirmed) {
-        setStatus(
-          "Warning: this commitment was not found in the pool's on-chain commitment list. The note may be from a different / redeployed pool.",
+        toast(
+          "Heads up: this deposit wasn't found in the current pool. Your note might belong to an older or different pool.",
+          "info",
         );
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setStatus(`Error: ${msg}`);
+      toast(friendlyError(err), "error");
     } finally {
       setIsLoading(false);
     }
@@ -103,68 +109,6 @@ export default function CompliancePage() {
 
   return (
     <PageShell>
-      <PageHeader
-        title="Compliance Report"
-        description="Generate a cryptographically verifiable report from a shielded Note. It attests that funds were deposited and whether they were later withdrawn — provable by anyone holding the Note, with no identity, KYC, or amount disclosed. Share it as a PDF; the other party pastes the Note here to reproduce the exact same report from public chain data."
-      />
-
-      {/* Explainer */}
-      <div className="mt-8">
-        <button
-          type="button"
-          onClick={() => setShowGuide((v) => !v)}
-          className="flex w-full items-center justify-between text-left"
-        >
-          <h2 className="text-sm font-semibold text-white">
-            How the compliance tool works
-          </h2>
-          <span className="text-xs text-zinc-500 hover:text-zinc-300">
-            {showGuide ? "Hide" : "Show"}
-          </span>
-        </button>
-        {showGuide && (
-          <Card border="brand" className="mt-4">
-            <p className="text-sm leading-relaxed text-zinc-300">
-              Every deposit creates a{" "}
-              <span className="font-medium text-white">Note</span> — the same
-              secret you use to withdraw. From that Note alone, this tool
-              recomputes your commitment and nullifier and reads the pool&apos;s
-              authoritative on-chain views to build a report. Because it&apos;s
-              all derived from public data, anyone you share the Note with can
-              reproduce the identical report — no auditor or trust required.
-            </p>
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              <div>
-                <h3 className="text-xs font-semibold tracking-wide text-green-400 uppercase">
-                  What the report proves
-                </h3>
-                <ul className="mt-2 space-y-1.5">
-                  {PROVES.map((t) => (
-                    <li key={t} className="flex gap-2 text-xs text-zinc-400">
-                      <span className="text-green-500">+</span>
-                      {t}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <h3 className="text-xs font-semibold tracking-wide text-zinc-500 uppercase">
-                  What it never reveals
-                </h3>
-                <ul className="mt-2 space-y-1.5">
-                  {NEVER.map((t) => (
-                    <li key={t} className="flex gap-2 text-xs text-zinc-400">
-                      <span className="text-zinc-600">–</span>
-                      {t}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          </Card>
-        )}
-      </div>
-
       {/* Mode toggle */}
       <div className="mt-8 grid grid-cols-2 gap-2">
         <SelectButton
@@ -375,9 +319,6 @@ export default function CompliancePage() {
           </Card>
         )}
 
-        {status && (
-          <StatusMessage message={status} successHints={["verified"]} />
-        )}
       </div>
     </PageShell>
   );

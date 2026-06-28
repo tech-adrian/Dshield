@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useReducer } from "react";
 import { useWallet } from "@/components/WalletProvider";
 import {
   buildContractCall,
@@ -15,6 +15,7 @@ import {
 import {
   getActiveNotes,
   markNoteSpent,
+  parseNote,
   saveNoteIfNew,
   type ShieldedNote,
 } from "@/lib/notes";
@@ -29,15 +30,17 @@ import {
   fetchCommitmentsFromChain,
 } from "@/lib/indexer";
 import { proveWithdrawal } from "@/lib/prover";
+import { friendlyError } from "@/lib/errors";
+import { syncSpentNotes } from "@/lib/sync";
 import { truncateMiddle } from "@/lib/format";
 import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { SelectButton } from "@/components/ui/SelectButton";
-import { StatusMessage } from "@/components/ui/StatusMessage";
 import { ProgressSteps } from "@/components/ui/ProgressSteps";
 import { NoteImport } from "@/components/ui/NoteImport";
+import { useToast } from "@/components/ui/Toast";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 type WithdrawStep =
@@ -69,11 +72,37 @@ const PROGRESS_STEPS = [
 
 export default function WithdrawPage() {
   const { address, signTransaction } = useWallet();
-  const [status, setStatus] = useState("");
+  const { toast } = useToast();
   const [step, setStep] = useState<WithdrawStep>("idle");
   const [isLoading, setIsLoading] = useState(false);
   const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
   const [recipient, setRecipient] = useState("");
+  const [, refresh] = useReducer((x: number) => x + 1, 0);
+
+  // Import a shared note from the URL hash on mount. setSelectedNote here is a
+  // legitimate one-time init from an external source (the link), matching the
+  // mount-time pattern used elsewhere in the app.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash.startsWith("#note=")) return;
+    const note = parseNote(decodeURIComponent(hash.slice("#note=".length)));
+    if (!note) return;
+    saveNoteIfNew(note);
+    setSelectedNote(note);
+    history.replaceState(
+      null,
+      "",
+      window.location.pathname + window.location.search,
+    );
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  useEffect(() => {
+    syncSpentNotes().then((n) => {
+      if (n > 0) refresh();
+    });
+  }, []);
 
   const activeNotes = typeof window !== "undefined" ? getActiveNotes() : [];
 
@@ -81,12 +110,11 @@ export default function WithdrawPage() {
     if (!address || !selectedNote) return;
     const poolId = selectedNote.poolId || POOL_CONTRACT_ID;
     if (!poolId) {
-      setStatus("Error: Pool contract ID not configured.");
+      toast("Pool address is missing — please refresh the page and try again.", "error");
       return;
     }
 
     setIsLoading(true);
-    setStatus("");
 
     try {
       setStep("checking_nullifier");
@@ -104,7 +132,7 @@ export default function WithdrawPage() {
       );
       if (isUsed && StellarSdk.scValToNative(isUsed) === true) {
         setStep("idle");
-        setStatus("Error: This note has already been spent on-chain.");
+        toast("This note has already been withdrawn — each note can only be spent once.", "error");
         setIsLoading(false);
         return;
       }
@@ -113,7 +141,7 @@ export default function WithdrawPage() {
       const rootVal = await queryContract(poolId, "get_root");
       if (!rootVal) {
         setStep("idle");
-        setStatus("Error: No Merkle root found. Has any deposit been made?");
+        toast("No deposits found in this pool yet. Make a deposit first, then try withdrawing.", "error");
         setIsLoading(false);
         return;
       }
@@ -125,7 +153,7 @@ export default function WithdrawPage() {
       // in canonical order and does not depend on RPC event retention or local
       // storage, so a tree built from it is guaranteed to match get_root.
       const poolKey = selectedNote.poolId || POOL_CONTRACT_ID;
-      setStatus("Fetching commitments from chain...");
+      toast("Loading deposit history from the blockchain…");
       const chainCommitments = await fetchCommitmentsFromChain(poolId);
 
       let commitments: string[];
@@ -141,10 +169,9 @@ export default function WithdrawPage() {
         commitments = getAllCommitments(poolKey);
         if (commitments.length === 0) {
           setStep("idle");
-          setStatus(
-            "Error: This pool does not expose get_commitments and no deposits " +
-              "could be recovered from events. Redeploy the pool (just deploy) " +
-              "and re-deposit.",
+          toast(
+            "Couldn't load deposit history for this pool. Try clearing the cache below, or contact support.",
+            "error",
           );
           setIsLoading(false);
           return;
@@ -156,14 +183,11 @@ export default function WithdrawPage() {
       if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
         setStep("idle");
         const usedChain = chainCommitments && chainCommitments.length > 0;
-        const detail = usedChain
-          ? "Rebuilt from the on-chain commitment list but roots still differ — " +
-            "this should not happen; please report it."
-          : "Rebuilt from event scan / local cache, which is incomplete on this " +
-            "RPC. Redeploy the pool (just deploy) so it exposes get_commitments, " +
-            "then re-deposit.";
-        setStatus(
-          `Error: Merkle root mismatch (${commitments.length} leaves). ${detail}`,
+        toast(
+          usedChain
+            ? "Deposit verification failed unexpectedly. Please report this along with your commitment hash."
+            : "Deposit history couldn't be fully loaded. Try 'Clear deposit cache & re-sync' below, then retry.",
+          "error",
         );
         setIsLoading(false);
         return;
@@ -177,13 +201,13 @@ export default function WithdrawPage() {
       // expensive proof so we fail fast.
       if (getUsdcSacId()) {
         if (recipientAddr === address) {
-          setStatus("Ensuring recipient USDC trustline...");
+          toast("Setting up your USDC account…");
           await ensureUsdcTrustline(address, signTransaction);
         } else if (!(await hasUsdcTrustline(recipientAddr!))) {
           setStep("idle");
-          setStatus(
-            `Error: Recipient ${recipientAddr!.slice(0, 8)}… has no USDC trustline. ` +
-              "Withdraw to your own address, or have the recipient add a USDC trustline first.",
+          toast(
+            `The recipient (${recipientAddr!.slice(0, 8)}…) can't receive USDC yet. Ask them to add a USDC trustline, or withdraw to your own address.`,
+            "error",
           );
           setIsLoading(false);
           return;
@@ -209,9 +233,10 @@ export default function WithdrawPage() {
         publicInputs = result.publicInputs;
       } catch (proveErr) {
         setStep("idle");
-        const msg =
-          proveErr instanceof Error ? proveErr.message : String(proveErr);
-        setStatus(`Error generating proof: ${msg}`);
+        toast(
+          `Proof generation failed — ${friendlyError(proveErr)} Try again, or re-deposit if this persists.`,
+          "error",
+        );
         setIsLoading(false);
         return;
       }
@@ -258,21 +283,16 @@ export default function WithdrawPage() {
       markNoteSpent(selectedNote.commitment);
       setSelectedNote(null);
       setStep("done");
-      setStatus(
-        `Withdrawal successful${viaRelayer ? " (relayed — unlinkable)" : ""}! TX: ${txHash.slice(0, 12)}...`,
+      toast(
+        viaRelayer
+          ? `Withdrawn privately via relayer. Funds are on the way! TX: ${txHash.slice(0, 12)}…`
+          : `Withdrawal complete! Funds sent. TX: ${txHash.slice(0, 12)}…`,
+        "success",
       );
     } catch (err) {
       setStep("idle");
-      let errorMessage = "Unknown error";
-      if (err instanceof Error) {
-        errorMessage = err.message;
-      } else if (typeof err === "string") {
-        errorMessage = err;
-      } else if (err && typeof err === "object") {
-        errorMessage = JSON.stringify(err);
-      }
       console.error("Withdrawal error:", err);
-      setStatus(`Error: ${errorMessage}`);
+      toast(friendlyError(err), "error");
     } finally {
       setIsLoading(false);
     }
@@ -281,7 +301,7 @@ export default function WithdrawPage() {
   async function handleClearCacheAndResync() {
     const poolId = selectedNote?.poolId || POOL_CONTRACT_ID;
     if (!poolId) {
-      setStatus("Error: Pool contract ID not configured.");
+      toast("Pool address is missing — please refresh the page and try again.", "error");
       return;
     }
 
@@ -289,15 +309,15 @@ export default function WithdrawPage() {
     try {
       // Drop this pool's cached deposit records (e.g. stale entries from a
       // previous deployment) and rebuild the set from on-chain events.
-      const removed = clearDeposits(poolId);
-      setStatus("Cache cleared. Re-syncing deposits from chain...");
+      clearDeposits(poolId);
+      toast("Cache cleared — reloading deposits from the blockchain…");
       const synced = await syncDepositsFromChain(poolId);
-      setStatus(
-        `Done: removed ${removed} cached record(s), re-synced ${synced} deposit(s) from chain. Try the withdrawal again.`,
+      toast(
+        `Cache refreshed — found ${synced} deposit${synced !== 1 ? "s" : ""}. Try withdrawing again.`,
+        "success",
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setStatus(`Error clearing cache: ${msg}`);
+      toast(`Couldn't clear the cache — ${friendlyError(err)}`, "error");
     } finally {
       setIsLoading(false);
     }
@@ -433,9 +453,6 @@ export default function WithdrawPage() {
           />
         )}
 
-        {status && (
-          <StatusMessage message={status} successHints={["successful"]} />
-        )}
       </div>
     </PageShell>
   );

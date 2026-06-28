@@ -15,26 +15,29 @@ import {
 import {
   saveNote,
   serializeNote,
+  generateNoteLink,
   generateRandomField,
   type ShieldedNote,
 } from "@/lib/notes";
 import { saveDeposit } from "@/lib/deposits";
 import { computeCommitment } from "@/lib/poseidon2";
 import { TOKEN_DECIMALS, TOKEN_SYMBOL, formatStroops } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { SelectButton } from "@/components/ui/SelectButton";
-import { StatusMessage } from "@/components/ui/StatusMessage";
+import { useToast } from "@/components/ui/Toast";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
 export default function DepositPage() {
   const { address, signTransaction } = useWallet();
-  const [status, setStatus] = useState<string>("");
+  const { toast } = useToast();
   const [isLoading, setIsLoading] = useState(false);
   const [sessionNotes, setSessionNotes] = useState<ShieldedNote[]>([]);
   const [copiedKey, setCopiedKey] = useState<string>("");
+  const [shareOpenKey, setShareOpenKey] = useState<string>("");
   const [customAmount, setCustomAmount] = useState<string>("");
   const [tiers] = useState<PoolTier[]>(() => getPoolTiers());
   const [selectedTier, setSelectedTier] = useState<PoolTier | null>(() => {
@@ -66,7 +69,7 @@ export default function DepositPage() {
       // Both are no-ops once satisfied.
       const sac = getUsdcSacId();
       if (sac) {
-        setStatus("Checking USDC trustline...");
+        toast("Checking your USDC setup…");
         await ensureUsdcTrustline(address, signTransaction);
 
         const needed = selectedTier.amount * total;
@@ -77,82 +80,80 @@ export default function DepositPage() {
           ? BigInt(StellarSdk.scValToNative(balVal) as string | number)
           : BigInt(0);
         if (balance < BigInt(needed)) {
-          setStatus("Funding wallet with test USDC...");
+          toast("Topping up your wallet with test USDC…");
           // Mint a generous buffer so subsequent deposits don't re-faucet.
           await faucetUsdc(address, BigInt(needed) * BigInt(2) - balance);
         }
       }
 
-      for (let n = 0; n < total; n++) {
-        setStatus(
-          total > 1
-            ? `Note ${n + 1}/${total}: Generating nullifier and secret...`
-            : "Generating nullifier and secret...",
-        );
+      // Generate every note's secrets and commitment up front. The leaf index
+      // each note will land on is read once from the chain (the next free slot)
+      // and assigned sequentially — exactly how the contract inserts them — so a
+      // single batched deposit yields the same indices as repeated deposits.
+      const nextIndexVal = await queryContract(selectedTier.id, "get_next_index");
+      const firstIndex = nextIndexVal
+        ? Number(StellarSdk.scValToNative(nextIndexVal))
+        : 0;
 
+      const pending: ShieldedNote[] = [];
+      for (let n = 0; n < total; n++) {
         const nullifier = generateRandomField();
         const secret = generateRandomField();
-
         const commitment = await computeCommitment(nullifier, secret);
         const commitmentClean = commitment.replace(/^0x/, "");
-
-        const nextIndexVal = await queryContract(
-          selectedTier.id,
-          "get_next_index",
-        );
-        const leafIndex = nextIndexVal
-          ? Number(StellarSdk.scValToNative(nextIndexVal))
-          : 0;
-
-        setStatus(
-          total > 1
-            ? `Note ${n + 1}/${total}: Building transaction...`
-            : "Building transaction...",
-        );
-        const depositorScVal = StellarSdk.nativeToScVal(address, {
-          type: "address",
-        });
-        const commitmentScVal = StellarSdk.xdr.ScVal.scvBytes(
-          Buffer.from(commitmentClean, "hex"),
-        );
-
-        const tx = await buildContractCall(
-          selectedTier.id,
-          "deposit",
-          [depositorScVal, commitmentScVal],
-          address,
-        );
-
-        setStatus(
-          total > 1
-            ? `Note ${n + 1}/${total}: Signing...`
-            : "Signing transaction...",
-        );
-        const signedXdr = await signTransaction(tx.toXDR());
-
-        setStatus(
-          total > 1
-            ? `Note ${n + 1}/${total}: Submitting...`
-            : "Submitting transaction...",
-        );
-        await submitTransaction(signedXdr);
-
-        const note: ShieldedNote = {
+        pending.push({
           nullifier,
           secret,
           commitment: commitmentClean,
-          leafIndex,
+          leafIndex: firstIndex + n,
           amount: String(selectedTier.amount),
           spent: false,
           createdAt: Date.now(),
           poolId: selectedTier.id,
-        };
+        });
+      }
+
+      const depositorScVal = StellarSdk.nativeToScVal(address, {
+        type: "address",
+      });
+      const commitmentScVals = pending.map((note) =>
+        StellarSdk.xdr.ScVal.scvBytes(Buffer.from(note.commitment, "hex")),
+      );
+
+      // One contract call → one signature, whether shielding 1 note or many.
+      // `deposit_batch` transfers the full amount and inserts every commitment
+      // atomically; a single-element batch behaves exactly like `deposit`.
+      const tx =
+        total === 1
+          ? await buildContractCall(
+              selectedTier.id,
+              "deposit",
+              [depositorScVal, commitmentScVals[0]],
+              address,
+            )
+          : await buildContractCall(
+              selectedTier.id,
+              "deposit_batch",
+              [depositorScVal, StellarSdk.xdr.ScVal.scvVec(commitmentScVals)],
+              address,
+            );
+
+      toast(
+        total > 1
+          ? `Shielding ${total} notes — please sign once in your wallet…`
+          : "Please sign the transaction in your wallet…",
+      );
+      const signedXdr = await signTransaction(tx.toXDR());
+
+      toast("Sending to the network…");
+      await submitTransaction(signedXdr);
+
+      for (const note of pending) {
         saveNote(note);
         created.push(note);
-
         saveDeposit({
-          commitment: commitmentClean,
-          leafIndex,
+          commitment: note.commitment,
+          leafIndex: note.leafIndex,
           timestamp: Date.now(),
           poolId: selectedTier.id,
         });
@@ -161,20 +162,15 @@ export default function DepositPage() {
       setSessionNotes(created);
 
       const totalUsdc = (total * selectedTier.amount) / 10 ** TOKEN_DECIMALS;
-      setStatus(
-        `Deposit successful! ${totalUsdc} ${TOKEN_SYMBOL} shielded across ${total} note${total > 1 ? "s" : ""}.`,
+      toast(
+        total > 1
+          ? `${totalUsdc} ${TOKEN_SYMBOL} shielded across ${total} notes — save your notes below!`
+          : `${totalUsdc} ${TOKEN_SYMBOL} is now shielded — save your note below!`,
+        "success",
       );
     } catch (err) {
-      let errorMessage = "Unknown error";
-      if (err instanceof Error) {
-        errorMessage = err.message;
-      } else if (typeof err === "string") {
-        errorMessage = err;
-      } else if (err && typeof err === "object") {
-        errorMessage = JSON.stringify(err);
-      }
       console.error("Deposit error:", err);
-      setStatus(`Error: ${errorMessage}`);
+      toast(friendlyError(err), "error");
     } finally {
       setIsLoading(false);
       setCustomAmount("");
@@ -307,8 +303,6 @@ export default function DepositPage() {
               : "Select a denomination"}
         </Button>
 
-        {status && <StatusMessage message={status} className="mt-4" />}
-
         {sessionNotes.length > 0 && (
           <div className="mt-4 space-y-3">
             <div className="rounded-xl border border-yellow-600/40 bg-yellow-950/20 p-3">
@@ -327,6 +321,16 @@ export default function DepositPage() {
 
             {sessionNotes.map((note, i) => {
               const serialized = serializeNote(note);
+              const shareLink = generateNoteLink(note);
+              const shareOpen = shareOpenKey === note.commitment;
+              const xText = encodeURIComponent(
+                "Claim your DShield payment — open this link to withdraw:\n" + shareLink,
+              );
+              const tgUrl =
+                "https://t.me/share/url?url=" +
+                encodeURIComponent(shareLink) +
+                "&text=" +
+                encodeURIComponent("Your DShield payment — click to claim:");
               return (
                 <div
                   key={note.commitment}
@@ -340,13 +344,26 @@ export default function DepositPage() {
                         : ""}{" "}
                       · {formatStroops(Number(note.amount))}
                     </p>
-                    <button
-                      type="button"
-                      onClick={() => copyText(serialized, note.commitment)}
-                      className="shrink-0 text-xs font-medium text-brand-400 hover:text-brand-300"
-                    >
-                      {copiedKey === note.commitment ? "Copied!" : "Copy note"}
-                    </button>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => copyText(serialized, note.commitment)}
+                        className="text-xs font-medium text-brand-400 hover:text-brand-300"
+                      >
+                        {copiedKey === note.commitment ? "Copied!" : "Copy note"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShareOpenKey((k) =>
+                            k === note.commitment ? "" : note.commitment,
+                          )
+                        }
+                        className="text-xs font-medium text-zinc-400 hover:text-white"
+                      >
+                        {shareOpen ? "Close" : "Share"}
+                      </button>
+                    </div>
                   </div>
                   <p className="mt-1.5 break-all font-mono text-xs text-zinc-200">
                     {serialized}
@@ -354,6 +371,65 @@ export default function DepositPage() {
                   <p className="mt-2 break-all font-mono text-[11px] text-zinc-600">
                     Commitment: {note.commitment}
                   </p>
+
+                  {shareOpen && (
+                    <div className="mt-3 rounded-lg border border-zinc-700 bg-zinc-900 p-3">
+                      <p className="text-xs font-medium text-zinc-300">
+                        Share to claim
+                      </p>
+                      <p className="mt-1 text-[11px] text-yellow-400/80">
+                        Warning: this link contains your private note. Anyone who
+                        opens it can withdraw the funds — share only with the
+                        intended recipient via a private channel.
+                      </p>
+                      <p className="mt-2 break-all font-mono text-[11px] text-zinc-500">
+                        {shareLink}
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            copyText(shareLink, `link:${note.commitment}`)
+                          }
+                          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-400 hover:text-white"
+                        >
+                          {copiedKey === `link:${note.commitment}`
+                            ? "Copied!"
+                            : "Copy link"}
+                        </button>
+                        <a
+                          href={tgUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-400 hover:text-white"
+                        >
+                          Telegram
+                        </a>
+                        <a
+                          href={
+                            "https://wa.me/?text=" +
+                            encodeURIComponent(
+                              "Your DShield payment — click to claim: " +
+                                shareLink,
+                            )
+                          }
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-400 hover:text-white"
+                        >
+                          WhatsApp
+                        </a>
+                        <a
+                          href={`https://x.com/intent/tweet?text=${xText}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-400 hover:text-white"
+                        >
+                          X (public)
+                        </a>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}

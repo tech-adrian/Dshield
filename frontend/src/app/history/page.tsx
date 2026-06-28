@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useWallet } from "@/components/WalletProvider";
 import { getNotes } from "@/lib/notes";
 import { getKyc } from "@/lib/kyc";
@@ -8,7 +8,11 @@ import { formatStroopsOrDash } from "@/lib/format";
 import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
 import { Card } from "@/components/ui/Card";
 import { Badge, type BadgeProps } from "@/components/ui/Badge";
+import { Spinner } from "@/components/ui/Spinner";
 import { cn } from "@/lib/cn";
+
+/** How many activity rows to reveal per "page" as the user scrolls. */
+const PAGE_SIZE = 5;
 
 type ActivityItem = {
   type: "deposit" | "withdrawal" | "compliance";
@@ -73,9 +77,47 @@ export default function HistoryPage() {
   const { address } = useWallet();
   const [filter, setFilter] = useState<FilterType>("all");
   const [activity] = useState(() => buildActivity());
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const loadingRef = useRef(false);
 
   const filtered =
     filter === "all" ? activity : activity.filter((a) => a.type === filter);
+
+  const visible = filtered.slice(0, visibleCount);
+  const hasMore = visibleCount < filtered.length;
+
+  function changeFilter(next: FilterType) {
+    setFilter(next);
+    setVisibleCount(PAGE_SIZE); // restart pagination for the new filter
+  }
+
+  // Reveal the next batch when the sentinel near the end of the list scrolls
+  // into view. A short delay keeps the spinner perceptible so it reads as
+  // loading rather than a flash.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !hasMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0].isIntersecting || loadingRef.current) return;
+        loadingRef.current = true;
+        setLoadingMore(true);
+        window.setTimeout(() => {
+          setVisibleCount((c) => Math.min(c + PAGE_SIZE, filtered.length));
+          setLoadingMore(false);
+          loadingRef.current = false;
+        }, 350);
+      },
+      // Trigger before the user hits the very bottom of the list.
+      { rootMargin: "240px" },
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasMore, filtered.length]);
 
   const stats = {
     deposits: activity.filter((a) => a.type === "deposit").length,
@@ -131,7 +173,7 @@ export default function HistoryPage() {
         ).map(({ key, label }) => (
           <button
             key={key}
-            onClick={() => setFilter(key)}
+            onClick={() => changeFilter(key)}
             className={cn(
               "rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
               filter === key
@@ -155,34 +197,54 @@ export default function HistoryPage() {
             </p>
           </Card>
         ) : (
-          filtered.map((item, i) => (
-            <Card
-              key={`${item.commitment}-${item.type}-${i}`}
-              interactive
-              padding="sm"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge tone={TYPE_META[item.type].tone}>
-                      {TYPE_META[item.type].label}
-                    </Badge>
-                    {item.type !== "compliance" && (
-                      <span className="text-sm font-semibold text-white">
-                        {formatStroopsOrDash(item.amount)}
-                      </span>
-                    )}
+          <>
+            {visible.map((item, i) => (
+              <Card
+                key={`${item.commitment}-${item.type}-${i}`}
+                interactive
+                padding="sm"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge tone={TYPE_META[item.type].tone}>
+                        {TYPE_META[item.type].label}
+                      </Badge>
+                      {item.type !== "compliance" && (
+                        <span className="text-sm font-semibold text-white">
+                          {formatStroopsOrDash(item.amount)}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-2 truncate font-mono text-xs text-zinc-600">
+                      {item.commitment}
+                    </p>
                   </div>
-                  <p className="mt-2 truncate font-mono text-xs text-zinc-600">
-                    {item.commitment}
-                  </p>
+                  <span className="flex-shrink-0 text-xs text-zinc-600">
+                    {new Date(item.timestamp).toLocaleDateString()}
+                  </span>
                 </div>
-                <span className="flex-shrink-0 text-xs text-zinc-600">
-                  {new Date(item.timestamp).toLocaleDateString()}
-                </span>
+              </Card>
+            ))}
+
+            {/* Infinite-scroll sentinel — entering view loads the next batch. */}
+            {hasMore && (
+              <div
+                ref={sentinelRef}
+                className="flex items-center justify-center gap-2 py-4 text-xs text-zinc-500"
+              >
+                <Spinner />
+                {loadingMore ? "Loading more…" : "Scroll to load more"}
               </div>
-            </Card>
-          ))
+            )}
+
+            {!hasMore && filtered.length > PAGE_SIZE && (
+              <p className="py-4 text-center text-xs text-zinc-600">
+                That&apos;s everything — {filtered.length} item
+                {filtered.length === 1 ? "" : "s"}.
+              </p>
+            )}
+          </>
         )}
       </div>
     </PageShell>
