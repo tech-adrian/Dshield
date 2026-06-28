@@ -37,7 +37,6 @@ import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { SelectButton } from "@/components/ui/SelectButton";
 import { ProgressSteps } from "@/components/ui/ProgressSteps";
 import { NoteImport } from "@/components/ui/NoteImport";
 import { useToast } from "@/components/ui/Toast";
@@ -54,12 +53,12 @@ type WithdrawStep =
 
 const STEP_LABELS: Record<WithdrawStep, string> = {
   idle: "",
-  checking_nullifier: "Checking if note is already spent...",
-  building_tree: "Building Merkle tree from deposits...",
-  generating_proof: "Generating ZK proof (this may take a minute)...",
-  signing: "Signing transaction...",
-  submitting: "Submitting transaction...",
-  done: "Withdrawal complete!",
+  checking_nullifier: "Checking nullifier…",
+  building_tree: "Building Merkle tree…",
+  generating_proof: "Generating ZK proof (may take ~1 min)…",
+  signing: "Signing transaction…",
+  submitting: "Submitting transaction…",
+  done: "Done!",
 };
 
 const PROGRESS_STEPS = [
@@ -70,18 +69,23 @@ const PROGRESS_STEPS = [
   "submitting",
 ] as const;
 
+interface NoteResult {
+  note: ShieldedNote;
+  status: "pending" | "processing" | "done" | "error";
+  txHash?: string;
+  error?: string;
+}
+
 export default function WithdrawPage() {
   const { address, signTransaction } = useWallet();
   const { toast } = useToast();
   const [step, setStep] = useState<WithdrawStep>("idle");
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
+  const [selectedCommitments, setSelectedCommitments] = useState<Set<string>>(new Set());
   const [recipient, setRecipient] = useState("");
+  const [batchResults, setBatchResults] = useState<NoteResult[] | null>(null);
   const [, refresh] = useReducer((x: number) => x + 1, 0);
 
-  // Import a shared note from the URL hash on mount. setSelectedNote here is a
-  // legitimate one-time init from an external source (the link), matching the
-  // mount-time pattern used elsewhere in the app.
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const hash = window.location.hash;
@@ -89,12 +93,8 @@ export default function WithdrawPage() {
     const note = parseNote(decodeURIComponent(hash.slice("#note=".length)));
     if (!note) return;
     saveNoteIfNew(note);
-    setSelectedNote(note);
-    history.replaceState(
-      null,
-      "",
-      window.location.pathname + window.location.search,
-    );
+    setSelectedCommitments(new Set([note.commitment]));
+    history.replaceState(null, "", window.location.pathname + window.location.search);
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -106,310 +106,307 @@ export default function WithdrawPage() {
 
   const activeNotes = typeof window !== "undefined" ? getActiveNotes() : [];
 
-  async function handleAutomatedWithdraw() {
-    if (!address || !selectedNote) return;
-    const poolId = selectedNote.poolId || POOL_CONTRACT_ID;
-    if (!poolId) {
-      toast("Pool address is missing — please refresh the page and try again.", "error");
-      return;
+  function toggleNote(note: ShieldedNote) {
+    if (isLoading) return;
+    setSelectedCommitments((prev) => {
+      const next = new Set(prev);
+      next.has(note.commitment) ? next.delete(note.commitment) : next.add(note.commitment);
+      return next;
+    });
+  }
+
+  const selectedNotes = activeNotes.filter((n) =>
+    selectedCommitments.has(n.commitment),
+  );
+
+  async function withdrawNote(
+    note: ShieldedNote,
+    recipientAddr: string,
+    onStep: (s: WithdrawStep) => void,
+  ): Promise<string> {
+    const poolId = note.poolId || POOL_CONTRACT_ID;
+    if (!poolId) throw new Error("Pool address missing — refresh and try again.");
+
+    onStep("checking_nullifier");
+    const nullifierHash = await computeNullifierHash(note.nullifier);
+    const nullifierHashClean = nullifierHash.replace(/^0x/, "");
+    const isUsed = await queryContract(poolId, "is_nullifier_used", [
+      StellarSdk.xdr.ScVal.scvBytes(Buffer.from(nullifierHashClean, "hex")),
+    ]);
+    if (isUsed && StellarSdk.scValToNative(isUsed) === true) {
+      throw new Error("This note has already been withdrawn.");
     }
+
+    onStep("building_tree");
+    const rootVal = await queryContract(poolId, "get_root");
+    if (!rootVal) throw new Error("No deposits in this pool yet.");
+    const rootBytes = StellarSdk.scValToNative(rootVal) as Buffer;
+    const onChainRoot = "0x" + Buffer.from(rootBytes).toString("hex");
+
+    const chainCommitments = await fetchCommitmentsFromChain(poolId);
+    let commitments: string[];
+    if (chainCommitments && chainCommitments.length > 0) {
+      commitments = chainCommitments;
+    } else {
+      await syncDepositsFromChain(poolId);
+      commitments = getAllCommitments(note.poolId || POOL_CONTRACT_ID);
+      if (commitments.length === 0) {
+        throw new Error("Couldn't load deposit history. Try clearing the cache.");
+      }
+    }
+
+    const merkle = await buildMerkleTree(commitments, note.leafIndex);
+    if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
+      throw new Error("Merkle root mismatch. Try 'Clear cache & re-sync' then retry.");
+    }
+
+    if (getUsdcSacId()) {
+      if (recipientAddr === address) {
+        await ensureUsdcTrustline(address!, signTransaction);
+      } else if (!(await hasUsdcTrustline(recipientAddr))) {
+        throw new Error(`Recipient can't receive USDC yet — ask them to add a USDC trustline.`);
+      }
+    }
+
+    onStep("generating_proof");
+    const recipientHash = await computeRecipientHash(recipientAddr);
+    const { proof, publicInputs } = await proveWithdrawal({
+      nullifier: note.nullifier,
+      secret: note.secret,
+      root: onChainRoot,
+      nullifierHash,
+      recipientHash,
+      pathSiblings: merkle.pathSiblings,
+      pathBits: merkle.pathBits,
+    });
+
+    onStep("submitting");
+    const relayed = await relayWithdrawal({ poolId, recipient: recipientAddr, publicInputs, proof });
+    if (relayed) {
+      markNoteSpent(note.commitment);
+      return relayed.hash;
+    }
+
+    onStep("signing");
+    const tx = await buildContractCall(
+      poolId,
+      "withdraw",
+      [
+        StellarSdk.nativeToScVal(recipientAddr, { type: "address" }),
+        StellarSdk.xdr.ScVal.scvBytes(Buffer.from(publicInputs, "hex")),
+        StellarSdk.xdr.ScVal.scvBytes(Buffer.from(proof, "hex")),
+      ],
+      address!,
+    );
+    const signedXdr = await signTransaction(tx.toXDR());
+    onStep("submitting");
+    const txHash = await submitTransaction(signedXdr);
+    markNoteSpent(note.commitment);
+    return txHash;
+  }
+
+  async function handleBatchWithdraw() {
+    if (!address || selectedNotes.length === 0) return;
+    const recipientAddr = recipient.trim() || address;
 
     setIsLoading(true);
+    setStep("idle");
 
-    try {
-      setStep("checking_nullifier");
-      const nullifierHash = await computeNullifierHash(selectedNote.nullifier);
-      const nullifierHashClean = nullifierHash.replace(/^0x/, "");
+    const results: NoteResult[] = selectedNotes.map((note) => ({
+      note,
+      status: "pending",
+    }));
+    setBatchResults([...results]);
 
-      const isUsed = await queryContract(
-        poolId,
-        "is_nullifier_used",
-        [
-          StellarSdk.xdr.ScVal.scvBytes(
-            Buffer.from(nullifierHashClean, "hex"),
-          ),
-        ],
-      );
-      if (isUsed && StellarSdk.scValToNative(isUsed) === true) {
-        setStep("idle");
-        toast("This note has already been withdrawn — each note can only be spent once.", "error");
-        setIsLoading(false);
-        return;
-      }
+    for (let i = 0; i < results.length; i++) {
+      results[i] = { ...results[i], status: "processing" };
+      setBatchResults([...results]);
 
-      setStep("building_tree");
-      const rootVal = await queryContract(poolId, "get_root");
-      if (!rootVal) {
-        setStep("idle");
-        toast("No deposits found in this pool yet. Make a deposit first, then try withdrawing.", "error");
-        setIsLoading(false);
-        return;
-      }
-      const rootBytes = StellarSdk.scValToNative(rootVal) as Buffer;
-      const onChainRoot = "0x" + Buffer.from(rootBytes).toString("hex");
-
-      // Rebuild the tree from the AUTHORITATIVE on-chain commitment list
-      // (the contract's get_commitments view). This always returns every leaf
-      // in canonical order and does not depend on RPC event retention or local
-      // storage, so a tree built from it is guaranteed to match get_root.
-      const poolKey = selectedNote.poolId || POOL_CONTRACT_ID;
-      toast("Loading deposit history from the blockchain…");
-      const chainCommitments = await fetchCommitmentsFromChain(poolId);
-
-      let commitments: string[];
-      if (chainCommitments && chainCommitments.length > 0) {
-        // Authoritative path. Keep local storage in sync for other views, but
-        // do NOT mix it into the tree.
-        commitments = chainCommitments;
-      } else {
-        // The pool predates the get_commitments view. Fall back to event scan
-        // + local cache, which may be incomplete on networks with short event
-        // retention.
-        await syncDepositsFromChain(poolId);
-        commitments = getAllCommitments(poolKey);
-        if (commitments.length === 0) {
-          setStep("idle");
-          toast(
-            "Couldn't load deposit history for this pool. Try clearing the cache below, or contact support.",
-            "error",
-          );
-          setIsLoading(false);
-          return;
-        }
-      }
-
-      const merkle = await buildMerkleTree(commitments, selectedNote.leafIndex);
-
-      if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
-        setStep("idle");
-        const usedChain = chainCommitments && chainCommitments.length > 0;
-        toast(
-          usedChain
-            ? "Deposit verification failed unexpectedly. Please report this along with your commitment hash."
-            : "Deposit history couldn't be fully loaded. Try 'Clear deposit cache & re-sync' below, then retry.",
-          "error",
-        );
-        setIsLoading(false);
-        return;
-      }
-
-      const recipientAddr = recipient || address;
-
-      // The recipient must be able to receive USDC. For your own wallet we
-      // establish the trustline automatically; an external recipient must
-      // already have one (we can't sign on their behalf). Check before the
-      // expensive proof so we fail fast.
-      if (getUsdcSacId()) {
-        if (recipientAddr === address) {
-          toast("Setting up your USDC account…");
-          await ensureUsdcTrustline(address, signTransaction);
-        } else if (!(await hasUsdcTrustline(recipientAddr!))) {
-          setStep("idle");
-          toast(
-            `The recipient (${recipientAddr!.slice(0, 8)}…) can't receive USDC yet. Ask them to add a USDC trustline, or withdraw to your own address.`,
-            "error",
-          );
-          setIsLoading(false);
-          return;
-        }
-      }
-
-      setStep("generating_proof");
-      const recipientHash = await computeRecipientHash(recipientAddr!);
-
-      let proof: string;
-      let publicInputs: string;
       try {
-        const result = await proveWithdrawal({
-          nullifier: selectedNote.nullifier,
-          secret: selectedNote.secret,
-          root: onChainRoot,
-          nullifierHash: nullifierHash,
-          recipientHash,
-          pathSiblings: merkle.pathSiblings,
-          pathBits: merkle.pathBits,
-        });
-        proof = result.proof;
-        publicInputs = result.publicInputs;
-      } catch (proveErr) {
-        setStep("idle");
-        toast(
-          `Proof generation failed — ${friendlyError(proveErr)} Try again, or re-deposit if this persists.`,
-          "error",
+        const txHash = await withdrawNote(
+          results[i].note,
+          recipientAddr,
+          setStep,
         );
-        setIsLoading(false);
-        return;
+        results[i] = { ...results[i], status: "done", txHash };
+        setSelectedCommitments((prev) => {
+          const next = new Set(prev);
+          next.delete(results[i].note.commitment);
+          return next;
+        });
+      } catch (err) {
+        const msg = friendlyError(err);
+        results[i] = { ...results[i], status: "error", error: msg };
+        toast(`Note ${i + 1}/${results.length} failed: ${msg}`, "error");
       }
 
-      setStep("submitting");
-
-      // Prefer the relayer so the withdrawal is unlinkable — the user's own
-      // account never appears on-chain. The recipient binding (enforced by the
-      // contract) means the relayer can't redirect the funds. If no relayer is
-      // configured, fall back to a wallet-signed submission.
-      let txHash: string;
-      let viaRelayer = false;
-      const relayed = await relayWithdrawal({
-        poolId,
-        recipient: recipientAddr!,
-        publicInputs,
-        proof,
-      });
-      if (relayed) {
-        txHash = relayed.hash;
-        viaRelayer = true;
-      } else {
-        setStep("signing");
-        const recipientScVal = StellarSdk.nativeToScVal(recipientAddr, {
-          type: "address",
-        });
-        const publicInputsScVal = StellarSdk.xdr.ScVal.scvBytes(
-          Buffer.from(publicInputs, "hex"),
-        );
-        const proofScVal = StellarSdk.xdr.ScVal.scvBytes(
-          Buffer.from(proof, "hex"),
-        );
-        const tx = await buildContractCall(
-          poolId,
-          "withdraw",
-          [recipientScVal, publicInputsScVal, proofScVal],
-          address,
-        );
-        const signedXdr = await signTransaction(tx.toXDR());
-        setStep("submitting");
-        txHash = await submitTransaction(signedXdr);
-      }
-
-      markNoteSpent(selectedNote.commitment);
-      setSelectedNote(null);
-      setStep("done");
-      toast(
-        viaRelayer
-          ? `Withdrawn privately via relayer. Funds are on the way! TX: ${txHash.slice(0, 12)}…`
-          : `Withdrawal complete! Funds sent. TX: ${txHash.slice(0, 12)}…`,
-        "success",
-      );
-    } catch (err) {
-      setStep("idle");
-      console.error("Withdrawal error:", err);
-      toast(friendlyError(err), "error");
-    } finally {
-      setIsLoading(false);
+      setBatchResults([...results]);
     }
+
+    setStep("idle");
+    setIsLoading(false);
+
+    const done = results.filter((r) => r.status === "done").length;
+    const failed = results.filter((r) => r.status === "error").length;
+    if (done > 0) {
+      toast(
+        failed > 0
+          ? `${done} note${done > 1 ? "s" : ""} withdrawn, ${failed} failed.`
+          : `${done} note${done > 1 ? "s" : ""} withdrawn successfully!`,
+        failed > 0 ? "error" : "success",
+      );
+    }
+    refresh();
   }
 
   async function handleClearCacheAndResync() {
-    const poolId = selectedNote?.poolId || POOL_CONTRACT_ID;
+    const poolId = selectedNotes[0]?.poolId || POOL_CONTRACT_ID;
     if (!poolId) {
-      toast("Pool address is missing — please refresh the page and try again.", "error");
+      toast("Pool address is missing.", "error");
       return;
     }
-
     setIsLoading(true);
     try {
-      // Drop this pool's cached deposit records (e.g. stale entries from a
-      // previous deployment) and rebuild the set from on-chain events.
       clearDeposits(poolId);
-      toast("Cache cleared — reloading deposits from the blockchain…");
+      toast("Cache cleared — reloading from chain…");
       const synced = await syncDepositsFromChain(poolId);
-      toast(
-        `Cache refreshed — found ${synced} deposit${synced !== 1 ? "s" : ""}. Try withdrawing again.`,
-        "success",
-      );
+      toast(`Found ${synced} deposit${synced !== 1 ? "s" : ""}. Try again.`, "success");
     } catch (err) {
-      toast(`Couldn't clear the cache — ${friendlyError(err)}`, "error");
+      toast(`Couldn't clear cache — ${friendlyError(err)}`, "error");
     } finally {
       setIsLoading(false);
     }
   }
 
   if (!address) {
-    return (
-      <ConnectGate title="Withdraw" prompt="Connect your wallet to withdraw." />
-    );
+    return <ConnectGate title="Withdraw" prompt="Connect your wallet to withdraw." />;
   }
+
+  const processingNote = batchResults?.find((r) => r.status === "processing")?.note;
 
   return (
     <PageShell>
       <PageHeader
         title="Withdraw from Shielded Pool"
-        description="Prove you own a note in the Merkle tree without revealing which one. The ZK proof is generated automatically."
+        description="Select one or more notes and generate ZK proofs to withdraw privately. Each note is processed in sequence."
       />
 
       <div className="mt-8 space-y-6">
+        {/* Note selector */}
         <Card>
-          <h3 className="text-sm font-medium text-zinc-400">
-            Select a Note ({activeNotes.length} available)
-          </h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-zinc-400">
+              Your Notes ({activeNotes.length} available)
+            </h3>
+            {activeNotes.length > 0 && (
+              <button
+                disabled={isLoading}
+                onClick={() =>
+                  selectedCommitments.size === activeNotes.length
+                    ? setSelectedCommitments(new Set())
+                    : setSelectedCommitments(new Set(activeNotes.map((n) => n.commitment)))
+                }
+                className="text-xs text-zinc-500 transition-colors hover:text-zinc-300 disabled:pointer-events-none"
+              >
+                {selectedCommitments.size === activeNotes.length ? "Deselect all" : "Select all"}
+              </button>
+            )}
+          </div>
+
           {activeNotes.length === 0 ? (
-            <p className="mt-3 text-sm text-zinc-500">
-              No active notes. Deposit funds first.
-            </p>
+            <p className="mt-3 text-sm text-zinc-500">No active notes. Deposit funds first.</p>
           ) : (
             <div className="mt-3 space-y-2">
-              {activeNotes.map((note) => (
-                <SelectButton
-                  key={note.commitment}
-                  selected={selectedNote?.commitment === note.commitment}
-                  onClick={() => !isLoading && setSelectedNote(note)}
-                  disabled={isLoading}
-                  className="w-full border-zinc-800 text-left hover:border-zinc-700"
-                >
-                  <div className="font-mono text-xs text-zinc-300">
-                    {truncateMiddle(note.commitment, 16, 16)}
-                  </div>
-                  <div className="mt-1 flex justify-between text-xs text-zinc-500">
-                    <span>
-                      Created {new Date(note.createdAt).toLocaleDateString()}
-                    </span>
-                    <span>Leaf #{note.leafIndex}</span>
-                  </div>
-                </SelectButton>
-              ))}
+              {activeNotes.map((note) => {
+                const selected = selectedCommitments.has(note.commitment);
+                const result = batchResults?.find((r) => r.note.commitment === note.commitment);
+                return (
+                  <button
+                    key={note.commitment}
+                    onClick={() => toggleNote(note)}
+                    disabled={isLoading}
+                    className={`w-full rounded-xl border px-4 py-3 text-left transition-all disabled:pointer-events-none ${
+                      selected
+                        ? "border-brand-500/50 bg-brand-950/30"
+                        : "border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/40"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={`mt-0.5 h-4 w-4 shrink-0 rounded border transition-colors ${
+                            selected
+                              ? "border-brand-500 bg-brand-500"
+                              : "border-zinc-600"
+                          }`}
+                        >
+                          {selected && (
+                            <svg viewBox="0 0 16 16" fill="white" className="h-4 w-4">
+                              <path d="M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z" />
+                            </svg>
+                          )}
+                        </div>
+                        <span className="font-mono text-xs text-zinc-300">
+                          {truncateMiddle(note.commitment, 14, 14)}
+                        </span>
+                      </div>
+
+                      {/* Per-note result badge */}
+                      {result && (
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            result.status === "done"
+                              ? "bg-green-950/60 text-green-400"
+                              : result.status === "error"
+                                ? "bg-red-950/60 text-red-400"
+                                : result.status === "processing"
+                                  ? "bg-brand-950/60 text-brand-400"
+                                  : "bg-zinc-800 text-zinc-500"
+                          }`}
+                        >
+                          {result.status === "done"
+                            ? `✓ ${result.txHash ? truncateMiddle(result.txHash, 6, 4) : "done"}`
+                            : result.status === "error"
+                              ? "✗ failed"
+                              : result.status === "processing"
+                                ? "processing…"
+                                : "queued"}
+                        </span>
+                      )}
+                    </div>
+                    <div className="ml-6 mt-1 flex gap-4 text-xs text-zinc-500">
+                      <span>{new Date(note.createdAt).toLocaleDateString()}</span>
+                      <span>Leaf #{note.leafIndex}</span>
+                    </div>
+                    {result?.error && (
+                      <p className="ml-6 mt-1 text-xs text-red-400">{result.error}</p>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
         </Card>
 
+        {/* Import notes */}
         <NoteImport
           disabled={isLoading}
-          onImport={(note) => {
-            saveNoteIfNew(note);
-            setSelectedNote(note);
+          onImport={(notes) => {
+            const newSel = new Set(selectedCommitments);
+            for (const note of notes) {
+              const isNew = saveNoteIfNew(note);
+              if (isNew) newSel.add(note.commitment);
+            }
+            setSelectedCommitments(newSel);
+            refresh();
           }}
         />
 
-        {selectedNote && (
+        {/* Recipient + actions */}
+        {selectedNotes.length > 0 && (
           <>
             <Card>
-              <h3 className="mb-3 text-sm font-medium text-zinc-400">
-                Note Details
-              </h3>
-              <div className="space-y-2 font-mono text-xs">
-                <div>
-                  <span className="text-zinc-500">Nullifier: </span>
-                  <span className="break-all text-zinc-300">
-                    {selectedNote.nullifier}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-zinc-500">Secret: </span>
-                  <span className="break-all text-zinc-300">
-                    {selectedNote.secret}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-zinc-500">Leaf Index: </span>
-                  <span className="text-zinc-300">
-                    {selectedNote.leafIndex}
-                  </span>
-                </div>
-              </div>
-            </Card>
-
-            <Card>
-              <h3 className="mb-3 text-sm font-medium text-zinc-400">
-                Recipient Address
-              </h3>
+              <h3 className="mb-3 text-sm font-medium text-zinc-400">Recipient Address</h3>
               <Input
                 type="text"
                 mono
@@ -423,10 +420,14 @@ export default function WithdrawPage() {
             <Button
               fullWidth
               size="lg"
-              onClick={handleAutomatedWithdraw}
+              onClick={handleBatchWithdraw}
               disabled={isLoading}
             >
-              {isLoading ? "Processing..." : "Generate Proof & Withdraw"}
+              {isLoading
+                ? "Processing…"
+                : selectedNotes.length === 1
+                  ? "Generate Proof & Withdraw"
+                  : `Generate Proofs & Withdraw ${selectedNotes.length} Notes`}
             </Button>
 
             <Button
@@ -439,20 +440,27 @@ export default function WithdrawPage() {
               Clear deposit cache &amp; re-sync from chain
             </Button>
             <p className="text-xs text-zinc-600">
-              Use this if you hit a Merkle root mismatch — it discards stale
-              local deposit records and rebuilds the set from on-chain events.
+              Use this if you hit a Merkle root mismatch.
             </p>
           </>
         )}
 
-        {step !== "idle" && step !== "done" && (
-          <ProgressSteps
-            label={STEP_LABELS[step]}
-            steps={PROGRESS_STEPS}
-            current={step}
-          />
+        {/* Progress for current note */}
+        {isLoading && processingNote && step !== "idle" && (
+          <div className="space-y-2">
+            {batchResults && batchResults.length > 1 && (
+              <p className="text-xs text-zinc-500">
+                Note {batchResults.findIndex((r) => r.status === "processing") + 1} of{" "}
+                {batchResults.length}
+              </p>
+            )}
+            <ProgressSteps
+              label={STEP_LABELS[step]}
+              steps={PROGRESS_STEPS}
+              current={step}
+            />
+          </div>
         )}
-
       </div>
     </PageShell>
   );

@@ -177,14 +177,14 @@ export default function CompliancePage() {
             <NoteImport
               disabled={isLoading}
               title="Or paste a Shielded Note"
-              onImport={(note) => pickNote(note, true)}
+              onImport={(notes) => pickNote(notes[0], true)}
             />
           </>
         ) : (
           <NoteImport
             disabled={isLoading}
             title="Paste the Note from the report"
-            onImport={(note) => pickNote(note, false)}
+            onImport={(notes) => pickNote(notes[0], false)}
           />
         )}
 
