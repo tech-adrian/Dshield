@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useReducer } from "react";
+import { zipSync, strToU8 } from "fflate";
 import { getNotes, saveNoteIfNew, type ShieldedNote } from "@/lib/notes";
 import { friendlyError } from "@/lib/errors";
 import { syncSpentNotes } from "@/lib/sync";
@@ -11,7 +12,7 @@ import {
 } from "@/lib/report";
 import { explorerTxUrl, explorerContractUrl } from "@/lib/explorer";
 import { truncateMiddle } from "@/lib/format";
-import { PageShell, PageHeader } from "@/components/ui/Page";
+import { PageShell } from "@/components/ui/Page";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -21,73 +22,132 @@ import { NoteImport } from "@/components/ui/NoteImport";
 
 type Mode = "generate" | "verify";
 
-// What a note-based report proves vs. what it never discloses. Drives the
-// explainer so the privacy boundary is explicit.
-const PROVES = [
-  "The deposit exists in the pool (and its leaf index)",
-  "Whether the note has been withdrawn (nullifier spent)",
-  "The exact deposit & withdrawal transactions on-chain",
-];
-const NEVER = [
-  "The amount / denomination",
-  "The depositor or recipient address",
-  "Your identity — no KYC, no account login",
-  "Any of your other notes or balances",
-];
+type ReportStatus = "pending" | "loading" | "done" | "error";
+
+interface ReportResult {
+  note: ShieldedNote;
+  status: ReportStatus;
+  report?: ComplianceReport;
+  error?: string;
+}
 
 export default function CompliancePage() {
   const [mode, setMode] = useState<Mode>("generate");
-  const [selectedNote, setSelectedNote] = useState<ShieldedNote | null>(null);
-  const [report, setReport] = useState<ComplianceReport | null>(null);
+  const [selectedCommitments, setSelectedCommitments] = useState<Set<string>>(new Set());
+  const [results, setResults] = useState<ReportResult[]>([]);
+  const [expandedCommitment, setExpandedCommitment] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
   const { toast } = useToast();
-  const [copied, setCopied] = useState(false);
-  const [showGuide, setShowGuide] = useState(true);
   const [, refresh] = useReducer((x: number) => x + 1, 0);
 
   useEffect(() => {
-    syncSpentNotes().then((n) => {
-      if (n > 0) refresh();
-    });
+    syncSpentNotes().then((n) => { if (n > 0) refresh(); });
   }, []);
 
-  const notes = typeof window !== "undefined" ? getNotes() : [];
+  const allNotes = typeof window !== "undefined" ? getNotes() : [];
 
-  function pickNote(note: ShieldedNote, persist: boolean) {
-    if (persist) saveNoteIfNew(note);
-    setSelectedNote(note);
-    setReport(null);
+  function switchMode(m: Mode) {
+    setMode(m);
+    setResults([]);
+    setSelectedCommitments(new Set());
+    setExpandedCommitment(null);
   }
+
+  function toggleNote(note: ShieldedNote) {
+    if (isLoading) return;
+    setSelectedCommitments((prev) => {
+      const next = new Set(prev);
+      next.has(note.commitment) ? next.delete(note.commitment) : next.add(note.commitment);
+      return next;
+    });
+  }
+
+  const selectedNotes =
+    mode === "generate"
+      ? allNotes.filter((n) => selectedCommitments.has(n.commitment))
+      : Array.from(selectedCommitments)
+          .map((c) => allNotes.find((n) => n.commitment === c))
+          .filter((n): n is ShieldedNote => !!n);
 
   async function handleRun() {
-    if (!selectedNote) return;
+    if (selectedNotes.length === 0) return;
     setIsLoading(true);
-    setReport(null);
-    try {
-      const r = await buildComplianceReport(selectedNote);
-      setReport(r);
-      if (!r.depositConfirmed) {
-        toast(
-          "Heads up: this deposit wasn't found in the current pool. Your note might belong to an older or different pool.",
-          "info",
-        );
-      }
-    } catch (err) {
-      toast(friendlyError(err), "error");
-    } finally {
-      setIsLoading(false);
+    setExpandedCommitment(null);
+
+    // Seed all results as loading upfront so the accordion renders immediately.
+    const initial: ReportResult[] = selectedNotes.map((note) => ({
+      note,
+      status: "loading",
+    }));
+    setResults(initial);
+
+    // Run all reports in parallel; update each slot as it settles.
+    await Promise.allSettled(
+      selectedNotes.map(async (note, i) => {
+        try {
+          const report = await buildComplianceReport(note);
+          setResults((prev) => {
+            const next = [...prev];
+            next[i] = { note, status: "done", report };
+            return next;
+          });
+          if (!report.depositConfirmed) {
+            toast(
+              `Note ${truncateMiddle(note.commitment, 6, 4)}: deposit not found on-chain.`,
+              "info",
+            );
+          }
+        } catch (err) {
+          setResults((prev) => {
+            const next = [...prev];
+            next[i] = { note, status: "error", error: friendlyError(err) };
+            return next;
+          });
+        }
+      }),
+    );
+
+    setIsLoading(false);
+  }
+
+  function downloadOneTxt(report: ComplianceReport) {
+    const blob = new Blob([formatReportText(report)], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dshield-compliance-${report.commitment.replace(/^0x/, "").slice(0, 12)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadAllZip() {
+    const done = results.filter((r) => r.status === "done" && r.report);
+    if (done.length === 0) return;
+
+    const files: Record<string, Uint8Array> = {};
+    for (const r of done) {
+      const name = `dshield-compliance-${r.report!.commitment.replace(/^0x/, "").slice(0, 12)}.txt`;
+      files[name] = strToU8(formatReportText(r.report!));
     }
+
+    const zipped = zipSync(files);
+    const blob = new Blob([zipped], { type: "application/zip" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dshield-compliance-${Date.now()}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
-  function copyNote() {
-    if (!report) return;
-    void navigator.clipboard?.writeText(report.note);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  function copyNoteStr(noteStr: string, key: string) {
+    void navigator.clipboard?.writeText(noteStr);
+    setCopied(key);
+    setTimeout(() => setCopied((c) => (c === key ? null : c)), 1500);
   }
 
-  function downloadPdf() {
-    if (!report) return;
+  function downloadOnePdf(report: ComplianceReport) {
     const w = window.open("", "_blank");
     if (!w) return;
     w.document.write(reportHtml(report));
@@ -96,241 +156,296 @@ export default function CompliancePage() {
     w.print();
   }
 
-  function downloadTxt() {
-    if (!report) return;
-    const blob = new Blob([formatReportText(report)], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `dshield-compliance-${report.commitment.slice(2, 14)}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
+  const doneCount = results.filter((r) => r.status === "done").length;
+  const hasResults = results.length > 0;
 
   return (
     <PageShell>
       {/* Mode toggle */}
       <div className="mt-8 grid grid-cols-2 gap-2">
-        <SelectButton
-          selected={mode === "generate"}
-          onClick={() => {
-            setMode("generate");
-            setReport(null);
-            setSelectedNote(null);
-          }}
-          disabled={isLoading}
-          className="text-center font-medium"
-        >
-          Generate Report
+        <SelectButton selected={mode === "generate"} onClick={() => switchMode("generate")} disabled={isLoading} className="text-center font-medium">
+          Generate Reports
         </SelectButton>
-        <SelectButton
-          selected={mode === "verify"}
-          onClick={() => {
-            setMode("verify");
-            setReport(null);
-            setSelectedNote(null);
-          }}
-          disabled={isLoading}
-          className="text-center font-medium"
-        >
-          Verify a Report
+        <SelectButton selected={mode === "verify"} onClick={() => switchMode("verify")} disabled={isLoading} className="text-center font-medium">
+          Verify Reports
         </SelectButton>
       </div>
 
       <div className="mt-6 space-y-6">
-        {mode === "generate" ? (
-          <>
-            <Card>
+        {/* Note selection */}
+        {mode === "generate" && (
+          <Card>
+            <div className="flex items-center justify-between">
               <h3 className="text-sm font-medium text-zinc-400">
-                Select one of your Notes ({notes.length})
+                Your Notes ({allNotes.length})
               </h3>
-              {notes.length === 0 ? (
-                <p className="mt-3 text-sm text-zinc-500">
-                  No notes on this device. Deposit first, or paste a Note below.
-                </p>
-              ) : (
-                <div className="mt-3 space-y-2">
-                  {notes.map((note) => (
-                    <SelectButton
+              {allNotes.length > 0 && (
+                <button
+                  disabled={isLoading}
+                  onClick={() =>
+                    selectedCommitments.size === allNotes.length
+                      ? setSelectedCommitments(new Set())
+                      : setSelectedCommitments(new Set(allNotes.map((n) => n.commitment)))
+                  }
+                  className="text-xs text-zinc-500 transition-colors hover:text-zinc-300 disabled:pointer-events-none"
+                >
+                  {selectedCommitments.size === allNotes.length ? "Deselect all" : "Select all"}
+                </button>
+              )}
+            </div>
+
+            {allNotes.length === 0 ? (
+              <p className="mt-3 text-sm text-zinc-500">No notes on this device. Deposit first, or import below.</p>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {allNotes.map((note) => {
+                  const selected = selectedCommitments.has(note.commitment);
+                  return (
+                    <button
                       key={note.commitment}
-                      selected={selectedNote?.commitment === note.commitment}
-                      onClick={() => !isLoading && pickNote(note, false)}
+                      onClick={() => toggleNote(note)}
                       disabled={isLoading}
-                      className="w-full border-zinc-800 text-left hover:border-zinc-700"
+                      className={`w-full rounded-xl border px-4 py-3 text-left transition-all disabled:pointer-events-none ${
+                        selected
+                          ? "border-brand-500/50 bg-brand-950/30"
+                          : "border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/40"
+                      }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className={`h-4 w-4 shrink-0 rounded border transition-colors ${selected ? "border-brand-500 bg-brand-500" : "border-zinc-600"}`}>
+                          {selected && (
+                            <svg viewBox="0 0 16 16" fill="white" className="h-4 w-4">
+                              <path d="M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z" />
+                            </svg>
+                          )}
+                        </div>
                         <span className="font-mono text-xs text-zinc-300">
                           {truncateMiddle(note.commitment, 16, 16)}
                         </span>
-                        <Badge tone={note.spent ? "blue" : "green"}>
+                        <Badge tone={note.spent ? "blue" : "green"} className="ml-auto shrink-0">
                           {note.spent ? "Withdrawn" : "In pool"}
                         </Badge>
                       </div>
-                      <div className="mt-1 text-xs text-zinc-500">
-                        Leaf #{note.leafIndex}
-                      </div>
-                    </SelectButton>
-                  ))}
-                </div>
-              )}
-            </Card>
-            <NoteImport
-              disabled={isLoading}
-              title="Or paste a Shielded Note"
-              onImport={(notes) => pickNote(notes[0], true)}
-            />
-          </>
-        ) : (
-          <NoteImport
-            disabled={isLoading}
-            title="Paste the Note from the report"
-            onImport={(notes) => pickNote(notes[0], false)}
-          />
-        )}
-
-        {selectedNote && (
-          <Button fullWidth size="lg" onClick={handleRun} disabled={isLoading}>
-            {isLoading
-              ? "Reading chain..."
-              : mode === "generate"
-                ? "Generate Report"
-                : "Verify Report"}
-          </Button>
-        )}
-
-        {report && (
-          <Card border="brand">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-white">
-                {mode === "verify"
-                  ? "Independently verified from chain"
-                  : "Compliance Report"}
-              </h3>
-              <Badge tone={report.integrityOk ? "green" : "zinc"}>
-                {report.integrityOk ? "Note valid" : "Note mismatch"}
-              </Badge>
-            </div>
-
-            <dl className="mt-4 space-y-3 text-sm">
-              <ReportRow label="Network" value={report.network} />
-              <ReportRow
-                label="Deposit"
-                value={
-                  report.depositConfirmed ? (
-                    <span className="text-green-400">
-                      Confirmed on-chain (leaf #{report.leafIndex})
-                    </span>
-                  ) : (
-                    <span className="text-yellow-400">Not found on-chain</span>
-                  )
-                }
-              />
-              <ReportRow
-                label="Status"
-                value={
-                  report.withdrawn ? (
-                    <span className="text-blue-400">
-                      Withdrawn (nullifier spent)
-                    </span>
-                  ) : (
-                    <span className="text-zinc-300">In pool (unspent)</span>
-                  )
-                }
-              />
-              <ReportRow
-                label="Commitment"
-                value={
-                  <span className="font-mono text-xs break-all text-zinc-300">
-                    {report.commitment}
-                  </span>
-                }
-              />
-              <ReportRow
-                label="Nullifier hash"
-                value={
-                  <span className="font-mono text-xs break-all text-zinc-300">
-                    {report.nullifierHash}
-                  </span>
-                }
-              />
-              <ReportRow
-                label="Pool contract"
-                value={<ExplorerLink url={explorerContractUrl(report.poolId)} text={report.poolId} mono />}
-              />
-              {report.depositTx && (
-                <ReportRow
-                  label="Deposit tx"
-                  value={
-                    <ExplorerLink
-                      url={explorerTxUrl(report.depositTx.hash)}
-                      text={report.depositTx.hash}
-                      sub={report.depositTx.at}
-                      mono
-                    />
-                  }
-                />
-              )}
-              {report.withdrawTx && (
-                <ReportRow
-                  label="Withdraw tx"
-                  value={
-                    <ExplorerLink
-                      url={explorerTxUrl(report.withdrawTx.hash)}
-                      text={report.withdrawTx.hash}
-                      sub={report.withdrawTx.at}
-                      mono
-                    />
-                  }
-                />
-              )}
-            </dl>
-
-            <div className="mt-5 rounded-xl bg-zinc-800/80 p-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs text-zinc-500">
-                  Shielded Note (embedded for re-verification)
-                </p>
-                <button
-                  type="button"
-                  onClick={copyNote}
-                  className="shrink-0 text-xs font-medium text-brand-400 hover:text-brand-300"
-                >
-                  {copied ? "Copied!" : "Copy"}
-                </button>
+                      <div className="ml-6 mt-1 text-xs text-zinc-500">Leaf #{note.leafIndex}</div>
+                    </button>
+                  );
+                })}
               </div>
-              <p className="mt-1.5 font-mono text-xs break-all text-zinc-300">
-                {report.note}
-              </p>
-            </div>
-
-            <div className="mt-4 grid grid-cols-2 gap-2">
-              <Button variant="primary" onClick={downloadPdf}>
-                Download PDF
-              </Button>
-              <Button variant="outline" onClick={downloadTxt}>
-                Download .txt
-              </Button>
-            </div>
-            <p className="mt-3 text-xs text-zinc-600">
-              The exported report carries the Note. To verify, switch to the{" "}
-              <span className="text-zinc-400">Verify a Report</span> tab and paste
-              it — the report regenerates from chain and must match.
-            </p>
+            )}
           </Card>
         )}
 
+        {/* NoteImport for both modes */}
+        <NoteImport
+          disabled={isLoading}
+          title={mode === "generate" ? "Or import a Shielded Note" : "Paste notes to verify"}
+          onImport={(notes) => {
+            const newSel = new Set(selectedCommitments);
+            for (const note of notes) {
+              saveNoteIfNew(note);
+              newSel.add(note.commitment);
+            }
+            setSelectedCommitments(newSel);
+            refresh();
+          }}
+        />
+
+        {/* Run button */}
+        {selectedNotes.length > 0 && !hasResults && (
+          <Button fullWidth size="lg" onClick={handleRun} disabled={isLoading}>
+            {isLoading
+              ? "Reading chain…"
+              : mode === "generate"
+                ? selectedNotes.length === 1 ? "Generate Report" : `Generate ${selectedNotes.length} Reports`
+                : selectedNotes.length === 1 ? "Verify Report" : `Verify ${selectedNotes.length} Reports`}
+          </Button>
+        )}
+
+        {/* Results accordion */}
+        {hasResults && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-zinc-500">
+                {doneCount} of {results.length} complete
+              </p>
+              {doneCount > 1 && (
+                <button
+                  onClick={downloadAllZip}
+                  className="flex items-center gap-1.5 text-xs font-medium text-brand-400 transition-colors hover:text-brand-300"
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                  Download all (.zip)
+                </button>
+              )}
+            </div>
+
+            {results.map((r) => {
+              const isExpanded = expandedCommitment === r.note.commitment;
+              return (
+                <div key={r.note.commitment} className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/70 backdrop-blur-sm">
+                  {/* Accordion header */}
+                  <button
+                    onClick={() => setExpandedCommitment(isExpanded ? null : r.note.commitment)}
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-zinc-800/40"
+                  >
+                    <span className="flex-1 font-mono text-xs text-zinc-300">
+                      {truncateMiddle(r.note.commitment, 14, 12)}
+                    </span>
+
+                    <StatusBadge status={r.status} />
+
+                    {/* Per-note .txt download */}
+                    {r.status === "done" && r.report && (
+                      <span
+                        role="button"
+                        onClick={(e) => { e.stopPropagation(); downloadOneTxt(r.report!); }}
+                        className="rounded-md px-2 py-1 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-zinc-700 hover:text-white"
+                      >
+                        .txt
+                      </span>
+                    )}
+
+                    {/* Chevron */}
+                    <svg
+                      className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
+                      fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+
+                  {/* Accordion body */}
+                  {isExpanded && (
+                    <div className="border-t border-zinc-800 px-4 py-4">
+                      {r.status === "loading" && (
+                        <p className="text-sm text-zinc-500">Fetching from chain…</p>
+                      )}
+                      {r.status === "error" && (
+                        <p className="text-sm text-red-400">{r.error}</p>
+                      )}
+                      {r.status === "done" && r.report && (
+                        <ReportBody
+                          report={r.report}
+                          copiedKey={copied}
+                          onCopy={(key) => copyNoteStr(r.report!.note, key)}
+                          onDownloadPdf={() => downloadOnePdf(r.report!)}
+                          onDownloadTxt={() => downloadOneTxt(r.report!)}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Re-run / clear */}
+            <div className="flex gap-2">
+              <Button fullWidth variant="outline" size="sm" onClick={handleRun} disabled={isLoading} className="text-xs">
+                {isLoading ? "Running…" : "Re-run all"}
+              </Button>
+              <Button
+                fullWidth variant="ghost" size="sm"
+                onClick={() => { setResults([]); setExpandedCommitment(null); }}
+                disabled={isLoading}
+                className="text-xs text-zinc-500"
+              >
+                Clear results
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
     </PageShell>
   );
 }
 
-function ReportRow({
-  label,
-  value,
+function StatusBadge({ status }: { status: ReportStatus }) {
+  if (status === "loading") return <Badge tone="zinc">Loading…</Badge>;
+  if (status === "done") return <Badge tone="green">Verified</Badge>;
+  if (status === "error") return <Badge tone="zinc" className="bg-red-950/40 text-red-400">Error</Badge>;
+  return <Badge tone="zinc">Pending</Badge>;
+}
+
+function ReportBody({
+  report,
+  copiedKey,
+  onCopy,
+  onDownloadPdf,
+  onDownloadTxt,
 }: {
-  label: string;
-  value: React.ReactNode;
+  report: ComplianceReport;
+  copiedKey: string | null;
+  onCopy: (key: string) => void;
+  onDownloadPdf: () => void;
+  onDownloadTxt: () => void;
 }) {
+  const key = report.commitment;
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <Badge tone={report.integrityOk ? "green" : "zinc"}>
+          {report.integrityOk ? "Note valid" : "Note mismatch"}
+        </Badge>
+      </div>
+
+      <dl className="space-y-3 text-sm">
+        <ReportRow label="Network" value={report.network} />
+        <ReportRow
+          label="Deposit"
+          value={
+            report.depositConfirmed ? (
+              <span className="text-green-400">Confirmed on-chain (leaf #{report.leafIndex})</span>
+            ) : (
+              <span className="text-yellow-400">Not found on-chain</span>
+            )
+          }
+        />
+        <ReportRow
+          label="Status"
+          value={
+            report.withdrawn ? (
+              <span className="text-blue-400">Withdrawn (nullifier spent)</span>
+            ) : (
+              <span className="text-zinc-300">In pool (unspent)</span>
+            )
+          }
+        />
+        <ReportRow label="Commitment" value={<span className="break-all font-mono text-xs text-zinc-300">{report.commitment}</span>} />
+        <ReportRow label="Nullifier hash" value={<span className="break-all font-mono text-xs text-zinc-300">{report.nullifierHash}</span>} />
+        <ReportRow label="Pool contract" value={<ExplorerLink url={explorerContractUrl(report.poolId)} text={report.poolId} mono />} />
+        {report.depositTx && (
+          <ReportRow label="Deposit tx" value={<ExplorerLink url={explorerTxUrl(report.depositTx.hash)} text={report.depositTx.hash} sub={report.depositTx.at} mono />} />
+        )}
+        {report.withdrawTx && (
+          <ReportRow label="Withdraw tx" value={<ExplorerLink url={explorerTxUrl(report.withdrawTx.hash)} text={report.withdrawTx.hash} sub={report.withdrawTx.at} mono />} />
+        )}
+      </dl>
+
+      <div className="rounded-xl bg-zinc-800/80 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-zinc-500">Shielded Note (for re-verification)</p>
+          <button
+            type="button"
+            onClick={() => onCopy(key)}
+            className="shrink-0 text-xs font-medium text-brand-400 hover:text-brand-300"
+          >
+            {copiedKey === key ? "Copied!" : "Copy"}
+          </button>
+        </div>
+        <p className="mt-1.5 break-all font-mono text-xs text-zinc-300">{report.note}</p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Button variant="primary" onClick={onDownloadPdf}>Download PDF</Button>
+        <Button variant="outline" onClick={onDownloadTxt}>Download .txt</Button>
+      </div>
+    </div>
+  );
+}
+
+function ReportRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-0.5 sm:flex-row sm:justify-between sm:gap-4">
       <dt className="shrink-0 text-zinc-500">{label}</dt>
@@ -339,33 +454,12 @@ function ReportRow({
   );
 }
 
-function ExplorerLink({
-  url,
-  text,
-  sub,
-  mono,
-}: {
-  url: string | null;
-  text: string;
-  sub?: string;
-  mono?: boolean;
-}) {
-  const body = (
-    <span className={mono ? "font-mono text-xs break-all" : "break-all"}>
-      {text}
-    </span>
-  );
+function ExplorerLink({ url, text, sub, mono }: { url: string | null; text: string; sub?: string; mono?: boolean }) {
+  const body = <span className={mono ? "break-all font-mono text-xs" : "break-all"}>{text}</span>;
   return (
     <span className="inline-block">
       {url ? (
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-brand-400 hover:text-brand-300"
-        >
-          {body}
-        </a>
+        <a href={url} target="_blank" rel="noopener noreferrer" className="text-brand-400 hover:text-brand-300">{body}</a>
       ) : (
         <span className="text-zinc-300">{body}</span>
       )}
@@ -374,26 +468,15 @@ function ExplorerLink({
   );
 }
 
-// Self-contained printable HTML for the browser's "Save as PDF". Kept inline so
-// the PDF needs no extra dependency. Values are hex/addresses/ISO timestamps.
 function reportHtml(r: ComplianceReport): string {
-  const row = (k: string, v: string) =>
-    `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
+  const row = (k: string, v: string) => `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
   const txUrl = (h: string) => explorerTxUrl(h);
-  const link = (h: string) => {
-    const u = txUrl(h);
-    return u ? `<a href="${u}">${h}</a>` : h;
-  };
+  const link = (h: string) => { const u = txUrl(h); return u ? `<a href="${u}">${h}</a>` : h; };
   const rows = [
     row("Generated", new Date(r.generatedAt).toISOString()),
     row("Network", r.network),
     row("Note integrity", r.integrityOk ? "OK — commitment matches" : "MISMATCH"),
-    row(
-      "Deposit",
-      r.depositConfirmed
-        ? `Confirmed on-chain (leaf #${r.leafIndex})`
-        : "Not found on-chain",
-    ),
+    row("Deposit", r.depositConfirmed ? `Confirmed on-chain (leaf #${r.leafIndex})` : "Not found on-chain"),
     row("Status", r.withdrawn ? "Withdrawn (nullifier spent)" : "In pool (unspent)"),
     row("Commitment", r.commitment),
     row("Nullifier hash", r.nullifierHash),
@@ -404,20 +487,17 @@ function reportHtml(r: ComplianceReport): string {
   return `<!doctype html><html><head><meta charset="utf-8"><title>DShield Compliance Report</title>
 <style>
   body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 24px;color:#18181b}
-  h1{font-size:20px;margin:0 0 4px}
-  .sub{color:#71717a;font-size:13px;margin:0 0 24px}
+  h1{font-size:20px;margin:0 0 4px}.sub{color:#71717a;font-size:13px;margin:0 0 24px}
   table{width:100%;border-collapse:collapse;font-size:13px}
   td{padding:8px 0;border-bottom:1px solid #e4e4e7;vertical-align:top}
-  td.k{color:#71717a;width:160px}
-  td.v{font-family:ui-monospace,monospace;word-break:break-all}
+  td.k{color:#71717a;width:160px}td.v{font-family:ui-monospace,monospace;word-break:break-all}
   .note{margin-top:24px;padding:12px;background:#f4f4f5;border-radius:8px;font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
-  .label{font-size:11px;color:#71717a;margin-bottom:6px}
-  a{color:#2563eb}
+  .label{font-size:11px;color:#71717a;margin-bottom:6px}a{color:#2563eb}
 </style></head><body>
 <h1>DShield Compliance Report</h1>
-<p class="sub">Verifiable from the embedded Note against public on-chain data. No identity, KYC, or amount disclosed.</p>
+<p class="sub">Verifiable from the embedded Note against public on-chain data.</p>
 <table>${rows}</table>
-<div class="label" style="margin-top:24px">Shielded Note — paste into the Compliance Tool's “Verify a Report” tab to reproduce this report</div>
+<div class="label" style="margin-top:24px">Shielded Note — paste into the Compliance Tool's "Verify" tab to reproduce this report</div>
 <div class="note">${r.note}</div>
 </body></html>`;
 }
