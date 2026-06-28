@@ -3,14 +3,16 @@ import { forwardRef } from "react";
 import { cn } from "@/lib/cn";
 
 export const buttonVariants = cva(
-  "focus-ring inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+  "focus-ring inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition-all duration-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100",
   {
     variants: {
       variant: {
         // High-emphasis call to action.
-        primary: "bg-white text-black hover:bg-zinc-200",
+        primary:
+          "bg-gradient-to-b from-brand-500 to-brand-600 text-white shadow-lg shadow-brand-950/50 hover:from-brand-400 hover:to-brand-500 hover:shadow-xl hover:shadow-brand-950/60",
         // Brand-accented action (e.g. threshold disclosure).
-        accent: "bg-brand-600 text-white hover:bg-brand-500",
+        accent:
+          "bg-brand-600 text-white shadow-lg shadow-brand-950/50 hover:bg-brand-500",
         // Bordered, lower emphasis.
         outline:
           "border border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-white",

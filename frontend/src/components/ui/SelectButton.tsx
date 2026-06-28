@@ -7,7 +7,7 @@ const selectButton = cva(
     variants: {
       selected: {
         true: "",
-        false: "border-zinc-700 text-zinc-400 hover:border-zinc-500",
+        false: "border-zinc-700 text-zinc-400 hover:border-brand-500/50",
       },
       tone: {
         white: "",
@@ -26,7 +26,7 @@ const selectButton = cva(
         class: "border-brand-500 bg-brand-950/30 text-brand-300",
       },
     ],
-    defaultVariants: { selected: false, tone: "white" },
+    defaultVariants: { selected: false, tone: "accent" },
   },
 );
 

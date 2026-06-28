@@ -14,13 +14,16 @@
   --color-brand-950: #1e1b4b;
   /* Secondary accent (cyan) for gradient endpoints. */
   --color-accent-400: #22d3ee;
+
+  /* Entrance animations — restrained, used for first-paint reveals. */
+  --animate-fade-up: fade-up 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-fade-in: fade-in 0.8s ease both;
 }
 
 @layer base {
   :root {
-    /* Page background + the soft glow anchored behind the hero/nav. */
+    /* Page background. */
     --bg: #09090b; /* zinc-950 */
-    --glow: rgba(79, 70, 229, 0.12);
   }
 
   html {
@@ -28,16 +31,38 @@
   }
 
   body {
+    position: relative;
     background-color: var(--bg);
-    /* Subtle radial wash at the top so the floating nav reads as elevated. */
-    background-image: radial-gradient(
-      60rem 32rem at 50% -8rem,
-      var(--glow),
-      transparent 70%
-    );
-    background-repeat: no-repeat;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * Faint engineering grid masked to the top of the page — adds structure and a
+   * "protocol" feel under the hero, then dissolves so the rest of the page
+   * stays calm. The moving color comes from <Background /> (drifting aurora
+   * blobs) which sits further back; this grid floats just above it.
+   */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+    background-size: 56px 56px;
+    -webkit-mask-image: radial-gradient(
+      58rem 40rem at 50% -2rem,
+      #000 0%,
+      transparent 78%
+    );
+    mask-image: radial-gradient(
+      58rem 40rem at 50% -2rem,
+      #000 0%,
+      transparent 78%
+    );
   }
 
   ::selection {
@@ -50,11 +75,210 @@
     scrollbar-width: thin;
     scrollbar-color: #3f3f46 transparent; /* zinc-700 thumb */
   }
+
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  /*
+   * Aurora drift — slow, small-amplitude movement for the background blobs.
+   * Kept gentle (sub-40px travel, ~10% scale) and slow so the page feels alive
+   * without ever drawing attention to itself.
+   */
+  @keyframes drift-a {
+    0%,
+    100% {
+      transform: translate(-50%, 0) scale(1);
+    }
+    50% {
+      transform: translate(-50%, 34px) scale(1.08);
+    }
+  }
+
+  @keyframes drift-b {
+    0%,
+    100% {
+      transform: translate(0, 0) scale(1);
+    }
+    50% {
+      transform: translate(-36px, 26px) scale(1.06);
+    }
+  }
+
+  @keyframes drift-c {
+    0%,
+    100% {
+      transform: translate(0, 0) scale(1);
+    }
+    50% {
+      transform: translate(30px, -28px) scale(1.05);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
 }
 
 @layer components {
   /* Shared focus ring for interactive primitives (buttons, inputs, cards). */
   .focus-ring {
     @apply outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950;
+  }
+
+  /*
+   * Static aurora hairline — a faint indigo→cyan→violet gradient ring that
+   * echoes the moving <Background /> palette, so framed surfaces (cards, the
+   * nav, the footer) feel tied to the live backdrop. Low opacity by design: it
+   * sits just over the base border and tints the edge rather than glowing.
+   */
+  .aurora-border {
+    position: relative;
+  }
+  .aurora-border::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    padding: 1px;
+    border-radius: inherit;
+    background: linear-gradient(
+      135deg,
+      rgba(99, 102, 241, 0.45),
+      rgba(34, 211, 238, 0.15) 42%,
+      transparent 62%,
+      rgba(139, 92, 246, 0.4)
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /*
+   * Aurora gradient ring for form fields. The double-background / background-clip
+   * trick paints a real indigo→cyan→violet border directly on the <input> (where
+   * ::before/::after don't render), respects the rounded corners, and brightens
+   * with a soft glow on focus.
+   */
+  .aurora-field {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(#27272a, #27272a) padding-box,
+      linear-gradient(
+          135deg,
+          rgba(99, 102, 241, 0.55),
+          rgba(34, 211, 238, 0.28) 45%,
+          rgba(139, 92, 246, 0.5)
+        )
+        border-box;
+    transition:
+      background 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+  .aurora-field:hover {
+    background:
+      linear-gradient(#2a2a2e, #2a2a2e) padding-box,
+      linear-gradient(
+          135deg,
+          rgba(99, 102, 241, 0.7),
+          rgba(34, 211, 238, 0.35) 45%,
+          rgba(139, 92, 246, 0.65)
+        )
+        border-box;
+  }
+  .aurora-field:focus,
+  .aurora-field:focus-visible {
+    outline: none;
+    background:
+      linear-gradient(#27272a, #27272a) padding-box,
+      linear-gradient(
+          135deg,
+          rgba(99, 102, 241, 0.95),
+          rgba(34, 211, 238, 0.5) 45%,
+          rgba(139, 92, 246, 0.9)
+        )
+        border-box;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+  }
+
+  /*
+   * Animated conic gradient border. Wrap content in `.gradient-border` and the
+   * brand ramp slowly rotates around the edge — used for the hero CTA so it
+   * draws the eye without flashing.
+   */
+  .gradient-border {
+    position: relative;
+    isolation: isolate;
+  }
+  .gradient-border::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    padding: 1px;
+    border-radius: inherit;
+    background: conic-gradient(
+      from var(--angle, 0deg),
+      var(--color-brand-500),
+      var(--color-accent-400),
+      var(--color-brand-700),
+      var(--color-brand-500)
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: spin-border 6s linear infinite;
+  }
+
+  @property --angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+  }
+
+  @keyframes spin-border {
+    to {
+      --angle: 360deg;
+    }
+  }
+}
+
+@layer utilities {
+  /* Stagger helpers for sequenced entrance reveals. */
+  .delay-100 {
+    animation-delay: 0.1s;
+  }
+  .delay-200 {
+    animation-delay: 0.2s;
+  }
+  .delay-300 {
+    animation-delay: 0.3s;
   }
 }

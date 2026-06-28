@@ -1,14 +1,14 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/cn";
 
-const card = cva("rounded-2xl border bg-zinc-900/70 backdrop-blur-sm", {
+const card = cva("aurora-border rounded-2xl border bg-zinc-900/70 backdrop-blur-sm", {
   variants: {
     border: {
       default: "border-zinc-800",
       brand: "border-brand-500/30 bg-brand-950/10",
     },
     interactive: {
-      true: "transition-colors hover:border-zinc-700",
+      true: "transition-all duration-300 hover:-translate-y-0.5 hover:border-brand-500/40 hover:shadow-lg hover:shadow-brand-950/40",
     },
     padding: {
       none: "",

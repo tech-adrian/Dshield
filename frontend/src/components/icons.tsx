@@ -99,6 +99,18 @@ export function MenuIcon({ className }: IconProps) {
   );
 }
 
+export function ShareIcon({ className }: IconProps) {
+  return (
+    <Svg className={className} strokeWidth={2}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M12 3v11m0-11L7 8m5-5 5 5M20 15v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4"
+      />
+    </Svg>
+  );
+}
+
 export function CloseIcon({ className }: IconProps) {
   return (
     <Svg className={className} strokeWidth={2}>
@@ -108,5 +120,54 @@ export function CloseIcon({ className }: IconProps) {
         d="M6 18 18 6M6 6l12 12"
       />
     </Svg>
+  );
+}
+
+export function ArrowRightIcon({ className }: IconProps) {
+  return (
+    <Svg className={className} strokeWidth={2}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M4.5 12h15m0 0-6.75-6.75M19.5 12l-6.75 6.75"
+      />
+    </Svg>
+  );
+}
+
+export function BoltIcon({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="m3.75 13.5 10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z"
+      />
+    </Svg>
+  );
+}
+
+export function CodeIcon({ className }: IconProps) {
+  return (
+    <Svg className={className} strokeWidth={2}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="m6.75 7.5-4.5 4.5 4.5 4.5m10.5-9 4.5 4.5-4.5 4.5M14.25 4.5l-4.5 15"
+      />
+    </Svg>
+  );
+}
+
+export function GithubIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={cn("h-6 w-6", className)}
+      aria-hidden="true"
+    >
+      <path d="M12 .5C5.73.5.6 5.63.6 11.9c0 5.02 3.26 9.28 7.78 10.78.57.1.78-.25.78-.55v-2.1c-3.17.69-3.84-1.36-3.84-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.75 1.18 1.75 1.18 1.02 1.75 2.68 1.24 3.33.95.1-.74.4-1.24.72-1.53-2.53-.29-5.2-1.27-5.2-5.64 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.45.11-3.02 0 0 .96-.31 3.15 1.18a10.9 10.9 0 0 1 5.74 0c2.18-1.49 3.14-1.18 3.14-1.18.62 1.57.23 2.73.11 3.02.74.8 1.18 1.82 1.18 3.07 0 4.38-2.67 5.35-5.21 5.63.41.36.78 1.06.78 2.14v3.17c0 .31.2.66.79.55 4.51-1.5 7.77-5.76 7.77-10.78C23.4 5.63 18.27.5 12 .5Z" />
+    </svg>
   );
 }
