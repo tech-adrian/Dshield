@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
     const source = await server.getAccount(issuer.publicKey());
     const contract = new StellarSdk.Contract(sacId);
     const tx = new StellarSdk.TransactionBuilder(source, {
-      fee: "1000000",
+      fee: StellarSdk.BASE_FEE,
       networkPassphrase: PASSPHRASE,
     })
       .addOperation(

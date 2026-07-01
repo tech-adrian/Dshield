@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
 
     const source = await server.getAccount(admin.publicKey());
     const tx = new StellarSdk.TransactionBuilder(source, {
-      fee: "10000000",
+      fee: StellarSdk.BASE_FEE,
       networkPassphrase: PASSPHRASE,
     })
       .addOperation(contract.call("register_kyc", kycHashScVal))

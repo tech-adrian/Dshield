@@ -142,7 +142,7 @@ export async function buildContractCall(
   const contract = new StellarSdk.Contract(contractId);
 
   const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: "10000000",
+    fee: StellarSdk.BASE_FEE,
     networkPassphrase: getNetworkPassphrase(),
   })
     .addOperation(contract.call(method, ...args))
@@ -231,7 +231,7 @@ export async function queryContract(
   );
 
   const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: "10000000",
+    fee: StellarSdk.BASE_FEE,
     networkPassphrase: getNetworkPassphrase(),
   })
     .addOperation(contract.call(method, ...args))
