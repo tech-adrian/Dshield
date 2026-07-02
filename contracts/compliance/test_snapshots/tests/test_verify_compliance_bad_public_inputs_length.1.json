@@ -43,6 +43,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "pools"
+                      },
+                      "val": {
+                        "vec": []
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "vk"
                       },
                       "val": {

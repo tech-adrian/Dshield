@@ -202,9 +202,16 @@ jobs:
         working-directory: frontend
         run: pnpm install
 
+      # `|| true` previously swallowed every finding unconditionally, so this
+      # step never actually gated CI. Known-unfixable transitive advisories
+      # (see frontend/pnpm-workspace.yaml overrides) are pinned to patched
+      # versions where a fix exists; --audit-level=moderate fails the build
+      # on anything moderate+ so new/regressed vulnerabilities are caught,
+      # while the one still-unpatched low-severity advisory (elliptic, no
+      # upstream fix released yet) doesn't block CI.
       - name: Audit dependencies
         working-directory: frontend
-        run: pnpm audit --prod || true
+        run: pnpm audit --prod --audit-level=moderate
 
       - name: Lint
         working-directory: frontend

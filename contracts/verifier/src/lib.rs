@@ -5,6 +5,18 @@ use ultrahonk_soroban_verifier::{UltraHonkVerifier, VkLoadError, PROOF_BYTES};
 #[contract]
 pub struct VerifierContract;
 
+// The VK is the only state, held in instance storage. Every real call
+// (verify_proof, invoked on every deposit-pool withdrawal) extends the TTL
+// so the entry doesn't silently expire and brick the contract between demos.
+const BUMP_THRESHOLD: u32 = 17_280; // ~1 day of ledgers
+const BUMP_AMOUNT: u32 = 518_400; // ~30 days of ledgers
+
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(BUMP_THRESHOLD, BUMP_AMOUNT);
+}
+
 #[contracterror]
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -50,6 +62,7 @@ impl VerifierContract {
         if proof_bytes.len() as usize != PROOF_BYTES {
             return Err(VerifierError::ProofParseError);
         }
+        bump_instance(&env);
 
         let vk_bytes: Bytes = env
             .storage()

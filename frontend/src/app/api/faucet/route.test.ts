@@ -12,8 +12,13 @@ async function loadRoute(secret?: string) {
   return (await import("./route")).POST;
 }
 
-// Minimal NextRequest stand-in — the handler only calls req.json().
-const req = (body: unknown) => ({ json: async () => body }) as never;
+// Minimal NextRequest stand-in — the handler calls req.json() and
+// req.headers.get(...) (for rate-limit keying).
+const req = (body: unknown, ip = "1.2.3.4") =>
+  ({
+    json: async () => body,
+    headers: { get: (k: string) => (k.toLowerCase() === "x-forwarded-for" ? ip : null) },
+  }) as never;
 
 describe("/api/faucet validation", () => {
   it("503 when the issuer secret is not configured", async () => {
@@ -32,5 +37,28 @@ describe("/api/faucet validation", () => {
     const POST = await loadRoute("Sxxx-dummy-secret");
     const res = await POST(req({ address: VALID_G, amount: "0" }));
     expect(res.status).toBe(400);
+  });
+});
+
+describe("/api/faucet rate limiting", () => {
+  it("429s a single IP after 5 requests within the window", async () => {
+    const POST = await loadRoute("Sxxx-dummy-secret");
+    // Each of these fails with 400 (invalid address, deliberately, to avoid
+    // needing a real RPC), but the rate limiter counts the attempt regardless.
+    for (let i = 0; i < 5; i++) {
+      const res = await POST(req({ address: "not-an-address", amount: "1" }, "9.9.9.9"));
+      expect(res.status).toBe(400);
+    }
+    const sixth = await POST(req({ address: "not-an-address", amount: "1" }, "9.9.9.9"));
+    expect(sixth.status).toBe(429);
+  });
+
+  it("does not rate-limit a different IP", async () => {
+    const POST = await loadRoute("Sxxx-dummy-secret");
+    for (let i = 0; i < 5; i++) {
+      await POST(req({ address: "not-an-address", amount: "1" }, "8.8.8.8"));
+    }
+    const res = await POST(req({ address: "not-an-address", amount: "1" }, "7.7.7.7"));
+    expect(res.status).toBe(400); // not 429
   });
 });

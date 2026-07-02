@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import { formatReportText, type ComplianceReport } from "./report";
 
 const base: ComplianceReport = {
-  note: "dshield-v1-CABC-9-100000000-deadbeef-00aa-00bb",
   network: "Testnet",
   poolId: "CABC",
   commitment: "0xdeadbeef",
@@ -17,20 +16,24 @@ const base: ComplianceReport = {
 };
 
 describe("formatReportText", () => {
-  it("includes the embedded note and the key on-chain facts", () => {
+  it("includes the key on-chain facts", () => {
     const t = formatReportText(base);
     expect(t).toContain("DShield Compliance Report");
-    expect(t).toContain(base.note);
     expect(t).toContain("leaf #9");
     expect(t).toContain("Withdrawn");
     expect(t).toContain(base.commitment);
     expect(t).toContain("abc123");
   });
 
-  it("never leaks an amount or address (none are in the model)", () => {
+  it("never leaks an amount, address, or the spendable note", () => {
     const t = formatReportText(base).toLowerCase();
     expect(t).not.toContain("usdc");
     expect(t).not.toContain("amount");
+    // The exported report must not carry the bearer-spendable note secret
+    // (serialized notes are prefixed "dshield-v1-") — sharing the report
+    // with a third party (e.g. an auditor) would otherwise let them drain
+    // the note.
+    expect(t).not.toContain("dshield-v1-");
   });
 
   it("renders the unconfirmed / unspent / no-tx case", () => {

@@ -8,6 +8,7 @@ import {
   serializeNote,
   parseNote,
   saveNoteIfNew,
+  generateNoteLink,
   type ShieldedNote,
 } from "./notes";
 
@@ -69,6 +70,87 @@ describe("serializeNote / parseNote", () => {
     expect(parseNote("tornado-eth-0.1-1-0xabc")).toBeNull();
     expect(parseNote("dshield-v2-a-0-1-c-n-s")).toBeNull();
     expect(parseNote("")).toBeNull();
+  });
+});
+
+describe("generateNoteLink (compact link encoding)", () => {
+  const HEX32_A = "1234567890abcdef".repeat(4);
+  const HEX32_B = "00aabbcc".repeat(8);
+  const HEX32_C = "deadbeef".repeat(8);
+  const VALID_POOL = "CBQ3EPNIMGLS53U4HHLT4V3HAGJJCLONVXAN2QEREGQZMFQOLK7VF6C7";
+
+  function fullNote(overrides: Partial<ShieldedNote> = {}): ShieldedNote {
+    return {
+      nullifier: HEX32_A,
+      secret: HEX32_B,
+      commitment: HEX32_C,
+      leafIndex: 42,
+      amount: "100000000",
+      spent: false,
+      createdAt: Date.now(),
+      poolId: VALID_POOL,
+      ...overrides,
+    };
+  }
+
+  function hashPayload(link: string): string {
+    return decodeURIComponent(link.split("#note=")[1]);
+  }
+
+  it("round-trips every withdrawable field through the compact format", () => {
+    const note = fullNote();
+    const link = generateNoteLink(note);
+    expect(hashPayload(link)).toMatch(/^dS2\./);
+
+    const restored = parseNote(hashPayload(link));
+    expect(restored).not.toBeNull();
+    expect(restored!.poolId).toBe(VALID_POOL);
+    expect(restored!.leafIndex).toBe(42);
+    expect(restored!.amount).toBe("100000000");
+    expect(restored!.commitment).toBe(HEX32_C);
+    expect(restored!.nullifier).toBe(HEX32_A);
+    expect(restored!.secret).toBe(HEX32_B);
+  });
+
+  it("round-trips a note with no poolId", () => {
+    const note = fullNote({ poolId: undefined });
+    const restored = parseNote(hashPayload(generateNoteLink(note)));
+    expect(restored!.poolId).toBeUndefined();
+  });
+
+  it("produces a materially shorter payload than the dash-joined backup format", () => {
+    const note = fullNote();
+    const compactLen = hashPayload(generateNoteLink(note)).length;
+    const legacyLen = serializeNote(note).length;
+    expect(compactLen).toBeLessThan(legacyLen * 0.75);
+  });
+
+  it("still parses a pre-existing dshield-v1 link (backward compatibility)", () => {
+    const note = fullNote();
+    const legacyPayload = serializeNote(note);
+    const restored = parseNote(legacyPayload);
+    expect(restored).not.toBeNull();
+    expect(restored!.commitment).toBe(HEX32_C);
+  });
+
+  it("falls back to the legacy format for fields that don't fit the compact encoding", () => {
+    // The default short fixture (8-char hex) isn't a valid 32-byte field,
+    // so encodeNoteCompact should decline and generateNoteLink should fall
+    // back to serializeNote rather than produce a broken link.
+    const shortNote: ShieldedNote = {
+      nullifier: "00aabbcc",
+      secret: "00ddeeff",
+      commitment: "abcd1234",
+      leafIndex: 0,
+      amount: "1000000",
+      spent: false,
+      createdAt: Date.now(),
+    };
+    const payload = hashPayload(generateNoteLink(shortNote));
+    expect(payload).toMatch(/^dshield-v1-/);
+    const restored = parseNote(payload);
+    expect(restored).not.toBeNull();
+    expect(restored!.commitment).toBe("abcd1234");
   });
 });
 
@@ -145,5 +227,70 @@ describe("getActiveNotes", () => {
     saveNote(makeNote({ commitment: "aaa" }));
     markNoteSpent("aaa");
     expect(getActiveNotes()).toHaveLength(0);
+  });
+});
+
+describe("generateNoteLink without a Buffer global", () => {
+  // Regression test for a real crash: the browser's `Buffer` only exists via
+  // a bundler polyfill. An earlier version of the compact link encoder used
+  // Buffer.alloc/writeUInt32BE/writeBigUInt64BE/copy/equals/
+  // toString("base64url") to pack the note — surface nothing else in this
+  // codebase exercises. That threw during render on the deposit
+  // success screen (a render-time throw unmounts the whole React tree,
+  // which is what actually crashed). Trying to fake a spec-compliant Buffer
+  // here to test the old behavior isn't safe either: swapping in anything
+  // that fails `instanceof Buffer` can crash unrelated code that assumes a
+  // real Buffer constructor exists (this was verified directly — even
+  // vitest's own error serializer does `instanceof Buffer` and hard-crashes
+  // the test worker on a fake one). So instead this removes `Buffer`
+  // entirely and asserts generateNoteLink degrades gracefully rather than
+  // throwing, and that the core packing (Uint8Array/DataView/btoa) needs no
+  // Buffer at all when no pool StrKey en/decoding is involved.
+  function withoutBuffer<T>(fn: () => T): T {
+    const RealBuffer = globalThis.Buffer;
+    // @ts-expect-error -- intentionally removing the global for this test
+    delete globalThis.Buffer;
+    try {
+      return fn();
+    } finally {
+      globalThis.Buffer = RealBuffer;
+    }
+  }
+
+  const note: ShieldedNote = {
+    nullifier: "1234567890abcdef".repeat(4),
+    secret: "00aabbcc".repeat(8),
+    commitment: "deadbeef".repeat(8),
+    leafIndex: 42,
+    amount: "100000000",
+    spent: false,
+    createdAt: Date.now(),
+  };
+
+  it("uses the compact format and round-trips with no poolId involved", () => {
+    const link = withoutBuffer(() => generateNoteLink(note));
+    const payload = decodeURIComponent(link.split("#note=")[1]);
+    expect(payload.startsWith("dS2.")).toBe(true);
+
+    const restored = withoutBuffer(() => parseNote(payload));
+    expect(restored).not.toBeNull();
+    expect(restored!.commitment).toBe(note.commitment);
+    expect(restored!.nullifier).toBe(note.nullifier);
+    expect(restored!.secret).toBe(note.secret);
+    expect(restored!.leafIndex).toBe(note.leafIndex);
+    expect(restored!.amount).toBe(note.amount);
+  });
+
+  it("degrades to the legacy format instead of throwing when poolId needs StrKey", () => {
+    const withPool = { ...note, poolId: "CBQ3EPNIMGLS53U4HHLT4V3HAGJJCLONVXAN2QEREGQZMFQOLK7VF6C7" };
+    let link = "";
+    expect(() => {
+      link = withoutBuffer(() => generateNoteLink(withPool));
+    }).not.toThrow();
+
+    const payload = decodeURIComponent(link.split("#note=")[1]);
+    expect(payload.startsWith("dshield-v1-")).toBe(true);
+    const restored = parseNote(payload);
+    expect(restored!.poolId).toBe(withPool.poolId);
   });
 });

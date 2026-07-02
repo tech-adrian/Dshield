@@ -181,13 +181,19 @@ deploy network="local": build
     ADMIN_ADDR=$ALICE_ADDR
 
     echo "Deploying compliance contract..."
+    # pools: the tier pool addresses the compliance contract cross-references
+    # to validate that a proof's merkle_root and disclosed_amount/threshold
+    # actually correspond to a real pool's fixed deposit_amount (see
+    # amount_for_root in contracts/compliance/src/lib.rs) — otherwise a
+    # prover could self-assert any amount.
     COMPLIANCE_ID=$(stellar contract deploy \
         --wasm target/wasm32v1-none/release/dshield_compliance.wasm \
         --source alice \
         --network "$NETWORK" \
         -- \
         --vk_bytes-file-path circuits/compliance/target/vk \
-        --admin "$ADMIN_ADDR")
+        --admin "$ADMIN_ADDR" \
+        --pools "[\"$POOL_10\",\"$POOL_100\",\"$POOL_1000\"]")
     echo "Compliance deployed: $COMPLIANCE_ID"
     echo "$COMPLIANCE_ID" > .compliance_id
 
@@ -202,6 +208,11 @@ deploy network="local": build
     ISSUER_SECRET=$(stellar keys show usdc-issuer 2>/dev/null || stellar keys secret usdc-issuer 2>/dev/null || true)
     RELAYER_SECRET=$(stellar keys show relayer 2>/dev/null || stellar keys secret relayer 2>/dev/null || true)
     ADMIN_SECRET=$(stellar keys show alice 2>/dev/null || stellar keys secret alice 2>/dev/null || true)
+    # Shared secret required as the x-admin-key header on /api/register-kyc
+    # (that route grants "KYC verified" status, so it must not be callable by
+    # an arbitrary visitor). Reused across redeploys if already set.
+    KYC_ADMIN_API_KEY=$(grep -m1 '^KYC_ADMIN_API_KEY=' frontend/.env.local 2>/dev/null | cut -d= -f2-)
+    [ -n "$KYC_ADMIN_API_KEY" ] || KYC_ADMIN_API_KEY=$(openssl rand -hex 24)
     # Only inject the dev secret key for local deployments (auto-connects a
     # funded wallet). For testnet/production, users connect via Freighter.
     if [ "$NETWORK" = "local" ]; then
@@ -219,6 +230,7 @@ deploy network="local": build
     USDC_ISSUER_SECRET=$ISSUER_SECRET
     RELAYER_SECRET=$RELAYER_SECRET
     COMPLIANCE_ADMIN_SECRET=$ADMIN_SECRET
+    KYC_ADMIN_API_KEY=$KYC_ADMIN_API_KEY
     NEXT_PUBLIC_POOL_CONTRACT_ID=$POOL_10
     NEXT_PUBLIC_POOL_TIERS=10 USDC:$POOL_10:100000000,100 USDC:$POOL_100:1000000000,1000 USDC:$POOL_1000:10000000000
     NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID=$COMPLIANCE_ID

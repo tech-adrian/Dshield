@@ -2,12 +2,10 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { POOL_CONTRACT_ID, queryContract } from "./stellar";
 import { computeCommitment, computeNullifierHash } from "./poseidon2";
 import { fetchCommitmentsFromChain, lookupNoteTxs } from "./indexer";
-import { serializeNote, type ShieldedNote } from "./notes";
+import { type ShieldedNote } from "./notes";
 import { getNetworkLabel } from "./explorer";
 
 export interface ComplianceReport {
-  /** The serialized note this report attests to (carried in the export so it can be re-verified). */
-  note: string;
   network: string;
   poolId: string;
   /** 0x-prefixed 32-byte commitment, recomputed from the note. */
@@ -28,10 +26,12 @@ export interface ComplianceReport {
 }
 
 /**
- * Build a compliance report for a note from authoritative on-chain data. Every
- * field is derivable by anyone who holds the note, so a third party can paste
- * the same note and reproduce this exact report — no auditor, KYC, or trust in
- * the report's author required. Deliberately omits amounts and addresses.
+ * Build a compliance report for a note from authoritative on-chain data.
+ * Deliberately omits amounts, addresses, AND the note itself (nullifier +
+ * secret): the note is a bearer-spendable credential, so embedding it in a
+ * report meant to be shared with a third party (an auditor, a PDF export)
+ * would hand them the ability to withdraw the funds. Reproducing this report
+ * requires the note out of band, from the holder directly.
  */
 export async function buildComplianceReport(
   note: ShieldedNote,
@@ -70,7 +70,6 @@ export async function buildComplianceReport(
   const txs = await lookupNoteTxs(poolId, commitment, nullifierHash);
 
   return {
-    note: serializeNote(note),
     network: getNetworkLabel(),
     poolId,
     commitment,
@@ -111,8 +110,5 @@ export function formatReportText(r: ComplianceReport): string {
     r.withdrawTx
       ? line("Withdraw tx", `${r.withdrawTx.hash} (${r.withdrawTx.at})`)
       : line("Withdraw tx", r.withdrawn ? "n/a (outside event retention)" : "—"),
-    "",
-    "Shielded note (paste into the Compliance Tool's Verify tab to reproduce this report):",
-    r.note,
   ].join("\n");
 }

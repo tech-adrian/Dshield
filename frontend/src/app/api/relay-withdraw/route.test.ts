@@ -11,7 +11,11 @@ async function loadRoute(secret?: string) {
   return (await import("./route")).POST;
 }
 
-const req = (body: unknown) => ({ json: async () => body }) as never;
+const req = (body: unknown, ip = "1.2.3.4") =>
+  ({
+    json: async () => body,
+    headers: { get: (k: string) => (k.toLowerCase() === "x-forwarded-for" ? ip : null) },
+  }) as never;
 
 const base = {
   poolId: VALID_C,
@@ -44,5 +48,18 @@ describe("/api/relay-withdraw validation", () => {
     const POST = await loadRoute("Sxxx-dummy-secret");
     const res = await POST(req({ ...base, publicInputs: "zz", proof: "00" }));
     expect(res.status).toBe(400);
+  });
+});
+
+describe("/api/relay-withdraw rate limiting", () => {
+  it("429s a single IP after 20 requests within the window", async () => {
+    const POST = await loadRoute("Sxxx-dummy-secret");
+    for (let i = 0; i < 20; i++) {
+      const res = await POST(req({ ...base, poolId: "not-a-contract" }, "9.9.9.9"));
+      expect(res.status).toBe(400);
+    }
+    const extra = await POST(req({ ...base, poolId: "not-a-contract" }, "9.9.9.9"));
+    expect(extra.status).toBe(429);
+    expect((await extra.json()).code).toBe("rate_limited");
   });
 });

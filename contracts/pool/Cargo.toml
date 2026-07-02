@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 # signature auth). See `recipient_hash_from_address` in src/lib.rs.
 soroban-sdk = { workspace = true, features = ["alloc", "hazmat-address"] }
 soroban-poseidon = "26.0.0"
-ultrahonk_soroban_verifier = { git = "https://github.com/yugocabrio/rs-soroban-ultrahonk", default-features = false }
+ultrahonk_soroban_verifier = { git = "https://github.com/yugocabrio/rs-soroban-ultrahonk", rev = "661db07200f890b1bd9a7349ed787c70a706dd12", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils", "alloc", "hazmat-address"] }

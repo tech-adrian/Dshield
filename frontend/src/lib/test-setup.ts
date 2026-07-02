@@ -16,6 +16,14 @@ Object.defineProperty(globalThis, "localStorage", {
 if (typeof globalThis.window === "undefined") {
   (globalThis as Record<string, unknown>).window = globalThis;
 }
+if (typeof (globalThis.window as { location?: unknown }).location === "undefined") {
+  (globalThis.window as unknown as Record<string, unknown>).location = {
+    origin: "https://dshield.test",
+    hash: "",
+    pathname: "/",
+    search: "",
+  };
+}
 
 beforeEach(() => {
   storage.clear();
