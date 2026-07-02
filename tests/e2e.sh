@@ -60,14 +60,26 @@ stellar keys rm e2e-test 2>/dev/null || true
 stellar keys generate e2e-test --network local
 E2E_ADDR=$(stellar keys address e2e-test)
 
-# Fund via friendbot. RPC health can be ready before friendbot is, so retry.
-# Trust friendbot's HTTP status (200 = funded; "already funded" also counts)
-# rather than parsing its JSON body or Horizon, whose availability/shape vary
-# by quickstart image. On failure, surface the last response for debugging.
+# RPC's getHealth can go green before Horizon (and friendbot, which sits
+# behind it) has finished spinning up / syncing from genesis - especially
+# on the `future` quickstart image. Hitting friendbot before Horizon is
+# ingesting just yields 502s, so wait for Horizon to report a real ledger
+# before even trying to fund.
+echo "Waiting for Horizon to come up..."
+for i in $(seq 1 60); do
+  LEDGER=$(curl -s http://localhost:8000/ 2>/dev/null | grep -o '"history_latest_ledger":[0-9]*' | grep -o '[0-9]*$')
+  [[ -n "$LEDGER" && "$LEDGER" -gt 0 ]] && break
+  sleep 3
+done
+
+# Fund via friendbot. Trust friendbot's HTTP status (200 = funded; "already
+# funded" also counts) rather than parsing its JSON body or Horizon, whose
+# availability/shape vary by quickstart image. On failure, surface the last
+# response for debugging.
 FUNDED=0
 CODE=000
 FB_BODY=/tmp/friendbot_resp.json
-for i in $(seq 1 30); do
+for i in $(seq 1 40); do
   # Preferred: let the CLI fund via the network's configured friendbot.
   if stellar keys fund e2e-test --network local >/dev/null 2>&1; then
     FUNDED=1
@@ -85,6 +97,9 @@ if [[ "$FUNDED" == "1" ]]; then
   ok "Account funded: ${E2E_ADDR:0:10}..."
 else
   err "Funding" "friendbot failed (last http=$CODE): $(head -c 300 "$FB_BODY" 2>/dev/null)"
+  echo -e "${RED}Cannot continue without a funded account - stopping here instead of cascading into deploy failures.${NC}"
+  stellar container stop stellar-local 2>/dev/null || true
+  exit 1
 fi
 
 # ─── Build circuits ───
