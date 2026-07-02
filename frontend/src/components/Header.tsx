@@ -82,6 +82,9 @@ export function Header() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- loading state must
+   * flip true synchronously when the dropdown opens, before the async
+   * fetch resolves, so the UI shows a loading state immediately. */
   useEffect(() => {
     if (!balanceOpen || !address) return;
     setLoadingBalances(true);
@@ -90,6 +93,7 @@ export function Header() {
       .catch(() => setBalances(null))
       .finally(() => setLoadingBalances(false));
   }, [balanceOpen, address]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     if (!balanceOpen) return;

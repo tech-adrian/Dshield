@@ -170,6 +170,42 @@ jobs:
       - name: Build contract WASMs
         run: stellar contract build
 
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Nargo (for hasher circuit)
+        run: |
+          curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
+          export PATH="$HOME/.nargo/bin:$PATH"
+          noirup -v 1.0.0-beta.9
+
+      - name: Compile hasher circuit
+        run: |
+          export PATH="$HOME/.nargo/bin:$PATH"
+          cd circuits/hasher && nargo compile
+          cp target/hasher.json ../../frontend/src/circuits/
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install
+
+      - name: Lint
+        working-directory: frontend
+        run: pnpm lint
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -213,10 +249,6 @@ jobs:
         working-directory: frontend
         run: pnpm audit --prod --audit-level=moderate
 
-      - name: Lint
-        working-directory: frontend
-        run: pnpm lint
-
       - name: Unit tests
         working-directory: frontend
         run: pnpm test
@@ -228,7 +260,7 @@ jobs:
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
-    needs: [contracts, circuits, frontend]
+    needs: [contracts, circuits, frontend, lint]
     steps:
       - uses: actions/checkout@v4
 

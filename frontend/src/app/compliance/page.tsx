@@ -57,7 +57,11 @@ export default function CompliancePage() {
     if (isLoading) return;
     setSelectedCommitments((prev) => {
       const next = new Set(prev);
-      next.has(note.commitment) ? next.delete(note.commitment) : next.add(note.commitment);
+      if (next.has(note.commitment)) {
+        next.delete(note.commitment);
+      } else {
+        next.add(note.commitment);
+      }
       return next;
     });
   }
