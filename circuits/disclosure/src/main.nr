@@ -49,11 +49,23 @@ pub fn main(
     let computed_root = compute_root(leaf, path_siblings, path_bits);
     assert(computed_root == merkle_root);
 
-    // 3. Threshold proof: balance >= threshold without revealing exact amount
+    // 3. Threshold proof: balance >= threshold without revealing exact amount.
+    //    Like compliance/main.nr, `amount` is NOT bound to the note above (the
+    //    leaf is hash2(nullifier, secret)), so this assert alone doesn't prove
+    //    the prover's real balance meets `threshold` -- it only proves the
+    //    prover's own self-chosen `amount` does. The `_binding` hash below is
+    //    likewise unconstrained (never asserted against anything) and proves
+    //    nothing on its own.
+    //
+    //    The real binding happens on-chain: DShield pools are
+    //    fixed-denomination, so the compliance contract's `amount_for_root`
+    //    resolves which configured pool `merkle_root` belongs to and rejects
+    //    the proof unless `threshold` does not exceed that pool's actual
+    //    `get_deposit_amount()`. See contracts/compliance/src/lib.rs
+    //    `verify_disclosure`.
     let amount_u64 = amount as u64;
     let threshold_u64 = threshold as u64;
     assert(amount_u64 >= threshold_u64);
 
-    // 4. Bind disclosure to auditor (prevents proof replay to others)
     let _binding = Poseidon2::hash([amount, auditor_key, nullifier], 3);
 }

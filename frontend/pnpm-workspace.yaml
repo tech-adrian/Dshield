@@ -1,3 +1,22 @@
+overrides:
+  # Transitive dependencies of wallet-connector SDKs (trezor/near/walletconnect
+  # via @creit.tech/stellar-wallets-kit) pinned to patched versions so
+  # `pnpm audit` isn't permanently red on issues we don't directly control.
+  # Caret-pinned (same major as what was already resolved) deliberately, not
+  # `>=`: an open range let pnpm jump protobufjs to 8.x and uuid to 14.x,
+  # crossing major versions these SDKs were never tested against — a
+  # regression risk with no way to exercise real Trezor/Solana wallet flows
+  # here to catch it. Same-major patch/minor bumps only.
+  #
+  # NOT overridden: `elliptic` (GHSA-848j-6mx2-7j84, low severity, via
+  # secp256k1 -> @near-js/crypto) has no patched release yet as of this
+  # writing (npm's latest is still 6.6.1, the vulnerable version) — nothing
+  # to pin to. Re-check periodically; `pnpm audit --prod` will surface it
+  # again once a fix ships.
+  protobufjs: "^7.6.3"
+  postcss: "^8.5.10"
+  uuid: "^11.1.1"
+  ws: "^8.21.0"
 allowBuilds:
   '@reown/appkit': true
   '@stellar/stellar-sdk': true

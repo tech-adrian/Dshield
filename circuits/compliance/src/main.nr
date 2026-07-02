@@ -53,12 +53,26 @@ pub fn main(
     let computed_root = compute_root(leaf, path_siblings, path_bits);
     assert(computed_root == merkle_root);
 
-    // 3. Selective disclosure: the disclosed amount matches the note's actual amount
-    //    bound to a specific auditor so the proof can't be replayed to others
+    // 3. Selective disclosure: `amount`/`disclosed_amount` are NOT bound to the
+    //    note above (the leaf is hash2(nullifier, secret) -- amount plays no
+    //    part in it), so this assert alone proves nothing about the real note;
+    //    a prover could pick any two equal values here. `disclosure_commitment`
+    //    and `expected` are computed but deliberately unused for the same
+    //    reason: hashing an unconstrained `amount` with anything doesn't
+    //    constrain it either.
+    //
+    //    The real amount binding happens on-chain: DShield pools are
+    //    fixed-denomination (every note in a given pool has the same
+    //    deposit_amount), so the compliance contract's `amount_for_root`
+    //    looks up which configured pool `merkle_root` belongs to (via
+    //    cross-contract `is_known_root`) and rejects the proof unless
+    //    `disclosed_amount` equals that pool's actual `get_deposit_amount()`.
+    //    See contracts/compliance/src/lib.rs `verify_compliance`. This
+    //    mirrors how the shielded_pool circuit's `recipient` binding is a
+    //    no-op in-circuit and enforced by the pool contract instead.
     let disclosure_commitment = hash3(amount, auditor_key, nullifier);
     let expected = hash2(disclosed_amount, auditor_key);
     assert(amount == disclosed_amount);
-    // Bind the disclosure to the auditor key so it can't be forwarded
     let _ = disclosure_commitment;
     let _ = expected;
 }

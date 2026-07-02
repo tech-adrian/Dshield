@@ -29,6 +29,7 @@ pub enum PoolError {
     TokenNotSet = 10,
     RecipientMismatch = 11,
     UnsupportedRecipient = 12,
+    AmountOverflow = 13,
 }
 
 #[contractevent(topics = ["deposit"], data_format = "map")]
@@ -246,6 +247,34 @@ fn insert_commitment(
     cur
 }
 
+/// Checks whether `root` is the current root or appears in the bounded root
+/// history ring. Shared by `withdraw`'s own root check and the public
+/// `is_known_root` view (used by other contracts, e.g. compliance, to
+/// validate a merkle_root belongs to this pool).
+fn root_is_known(env: &Env, root: &BytesN<32>) -> bool {
+    let rh_count: u32 = env
+        .storage()
+        .instance()
+        .get(&key_root_history_index())
+        .unwrap_or(0u32);
+    let check_count = if rh_count < ROOT_HISTORY_SIZE {
+        rh_count
+    } else {
+        ROOT_HISTORY_SIZE
+    };
+    let mut j = 0u32;
+    while j < check_count {
+        let rh_key = (key_root_history_prefix(), j);
+        if let Some(stored) = env.storage().instance().get::<_, BytesN<32>>(&rh_key) {
+            if &stored == root {
+                return true;
+            }
+        }
+        j += 1;
+    }
+    false
+}
+
 /// Records `root` as the current root and appends it to the bounded root
 /// history ring used to validate withdrawal proofs against recent states.
 fn commit_root(env: &Env, root: &BytesN<32>) {
@@ -290,10 +319,6 @@ impl PoolContract {
             return Err(PoolError::CommitmentExists);
         }
 
-        let (token_addr, amount) = load_token_and_amount(&env)?;
-        let contract_addr = env.current_contract_address();
-        token::Client::new(&env, &token_addr).transfer(&depositor, &contract_addr, &amount);
-
         let mut next_index: u32 = env
             .storage()
             .instance()
@@ -302,6 +327,10 @@ impl PoolContract {
         if next_index >= MAX_LEAVES {
             return Err(PoolError::TreeFull);
         }
+
+        let (token_addr, amount) = load_token_and_amount(&env)?;
+        let contract_addr = env.current_contract_address();
+        token::Client::new(&env, &token_addr).transfer(&depositor, &contract_addr, &amount);
 
         let idx = next_index;
         let zeroes = zeroes_for_tree(&env);
@@ -349,7 +378,9 @@ impl PoolContract {
         }
 
         let (token_addr, amount) = load_token_and_amount(&env)?;
-        let total = amount.saturating_mul(count as i128);
+        let total = amount
+            .checked_mul(count as i128)
+            .ok_or(PoolError::AmountOverflow)?;
         let contract_addr = env.current_contract_address();
         token::Client::new(&env, &token_addr).transfer(&depositor, &contract_addr, &total);
 
@@ -403,33 +434,7 @@ impl PoolContract {
             return Err(PoolError::RootNotSet);
         }
 
-        let mut root_valid = false;
-        let rh_count: u32 = env
-            .storage()
-            .instance()
-            .get(&key_root_history_index())
-            .unwrap_or(0u32);
-        let check_count = if rh_count < ROOT_HISTORY_SIZE {
-            rh_count
-        } else {
-            ROOT_HISTORY_SIZE
-        };
-        let mut j = 0u32;
-        while j < check_count {
-            let rh_key = (key_root_history_prefix(), j);
-            if let Some(stored) = env
-                .storage()
-                .instance()
-                .get::<_, BytesN<32>>(&rh_key)
-            {
-                if stored == root_from_proof {
-                    root_valid = true;
-                    break;
-                }
-            }
-            j += 1;
-        }
-        if !root_valid {
+        if !root_is_known(&env, &root_from_proof) {
             return Err(PoolError::RootMismatch);
         }
 
@@ -460,11 +465,17 @@ impl PoolContract {
             .get(&key_deposit_amount())
             .ok_or(PoolError::TokenNotSet)?;
 
+        // Mark the nullifier used BEFORE the token transfer (checks-effects-
+        // interactions). The deployed token is the trusted Stellar Asset
+        // Contract with no transfer hooks, but this ordering means even a
+        // token with callback behavior can't re-enter withdraw and replay
+        // this proof before it's recorded as spent.
+        env.storage().persistent().set(&nf_key, &true);
+        bump_persistent(&env, &nf_key);
+
         let contract_addr = env.current_contract_address();
         token::Client::new(&env, &token_addr).transfer(&contract_addr, &recipient, &amount);
 
-        env.storage().persistent().set(&nf_key, &true);
-        bump_persistent(&env, &nf_key);
         WithdrawEvent {
             nullifier_hash: &nf_from_proof,
         }
@@ -480,6 +491,14 @@ impl PoolContract {
 
     pub fn get_root(env: Env) -> Option<BytesN<32>> {
         env.storage().instance().get(&key_root())
+    }
+
+    /// True if `root` is the current root or within the bounded root history.
+    /// Used by other contracts (e.g. compliance) to confirm a merkle_root a
+    /// caller claims actually belongs to this pool, and to look up this
+    /// pool's fixed `deposit_amount` for that root via `get_deposit_amount`.
+    pub fn is_known_root(env: Env, root: BytesN<32>) -> bool {
+        root_is_known(&env, &root)
     }
 
     pub fn get_next_index(env: Env) -> u32 {
@@ -1558,6 +1577,79 @@ mod tests {
             let nf = dummy_commitment(&env, i);
             assert!(!client.is_nullifier_used(&nf));
         }
+    }
+
+    // ──────────────────────────────────────────────
+    //  is_known_root (used by compliance cross-contract calls)
+    // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_is_known_root_true_for_current_root() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        client.deposit(&depositor, &dummy_commitment(&env, 1));
+        let root = client.get_root().unwrap();
+        assert!(client.is_known_root(&root));
+    }
+
+    #[test]
+    fn test_is_known_root_true_for_historical_root() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        client.deposit(&depositor, &dummy_commitment(&env, 1));
+        let old_root = client.get_root().unwrap();
+        client.deposit(&depositor, &dummy_commitment(&env, 2));
+
+        assert!(client.is_known_root(&old_root));
+    }
+
+    #[test]
+    fn test_is_known_root_false_for_unknown_root() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let (pool_id, depositor, _) = setup_with_token(&env);
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        client.deposit(&depositor, &dummy_commitment(&env, 1));
+        let bogus = BytesN::from_array(&env, &[0xEE; 32]);
+        assert!(!client.is_known_root(&bogus));
+    }
+
+    // ──────────────────────────────────────────────
+    //  Deposit batch: overflow
+    // ──────────────────────────────────────────────
+
+    #[test]
+    fn test_deposit_batch_amount_overflow_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_unlimited();
+        let admin = <Address as TestAddress>::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+        let depositor = <Address as TestAddress>::generate(&env);
+        let verifier_id = <Address as TestAddress>::generate(&env);
+        // deposit_amount * count overflows i128 for any count >= 2.
+        let pool_id = env.register(
+            PoolContract,
+            (verifier_id, token_id.address(), i128::MAX),
+        );
+        let client = PoolContractClient::new(&env, &pool_id);
+
+        let mut commitments = SorobanVec::new(&env);
+        commitments.push_back(dummy_commitment(&env, 1));
+        commitments.push_back(dummy_commitment(&env, 2));
+
+        let result = client.try_deposit_batch(&depositor, &commitments);
+        assert_eq!(result.err().unwrap().unwrap(), PoolError::AmountOverflow);
     }
 
     #[test]

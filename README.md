@@ -160,8 +160,8 @@ What is **built and verified on-chain today** (testnet), versus the broader visi
 | Double-spend prevention (nullifiers) | ✅ |
 | Recipient binding (anti front-running) | ✅ |
 | **Relayer** — withdrawer's account never appears on-chain | ✅ |
-| Compliance: KYC registry + compliance proof verification | ✅ Verified on testnet (register KYC → prove → verify) |
-| Selective disclosure: threshold proofs (balance ≥ X) | ✅ Prove balance meets a minimum without revealing exact amount |
+| Compliance: KYC registry + compliance proof verification | ✅ Verified on testnet via CLI (`just demo-compliance`); not yet wired into the web app UI. `disclosed_amount` is cross-checked against the real pool's fixed `deposit_amount` on-chain, not self-asserted by the prover |
+| Selective disclosure: threshold proofs (balance ≥ X) | ✅ Circuit + contract implemented and CLI-verified; no web UI yet. `threshold` is likewise checked against the pool's real `deposit_amount` on-chain |
 | Arbitrary-amount private *transfers* between users | 🚧 Future (today: fixed-denomination pools) |
 
 DShield is currently a **fixed-denomination shielded pool** (Tornado-style: deposit a tier amount, withdraw it to any address). Privacy comes from breaking the on-chain link between depositor and recipient — not from hiding the tier amount. Relayed withdrawals mean the withdrawer never signs or pays a fee from their own account.

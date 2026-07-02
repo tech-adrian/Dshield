@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { checkRateLimit, clientKey } from "@/lib/rateLimit";
 
 // Server-side relayer: submits a withdrawal on the user's behalf, paying the
 // transaction fee from the relayer account. Because the pool contract binds the
@@ -21,11 +22,25 @@ function isStrKeyContract(id: string): boolean {
   }
 }
 
+// Garbage proofs are cheap to submit but still cost a simulate/submit RPC
+// round-trip against the relayer's own quota; cap how many a single client
+// can fire without limiting legitimate rapid multi-note withdrawals too hard.
+const RATE_LIMIT = 20;
+const RATE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
 export async function POST(req: NextRequest) {
   if (!RELAYER_SECRET) {
     return NextResponse.json(
       { error: "Relayer is not configured (RELAYER_SECRET unset).", code: "no_relayer" },
       { status: 503 },
+    );
+  }
+
+  const rl = checkRateLimit(`relay:${clientKey(req.headers)}`, RATE_LIMIT, RATE_WINDOW_MS);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Too many relay requests. Try again later.", code: "rate_limited" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
     );
   }
 

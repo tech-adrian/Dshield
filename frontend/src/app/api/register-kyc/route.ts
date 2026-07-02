@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { timingSafeEqual } from "crypto";
 
 const ADMIN_SECRET = process.env.COMPLIANCE_ADMIN_SECRET || "";
+// Registering a KYC hash grants "compliance-verified" status, so this route
+// must not be callable by an arbitrary visitor (anyone could pick their own
+// preimage, hash it, and self-register). Requires a server-only shared
+// secret sent as the x-admin-key header; only whoever runs the admin/KYC
+// intake flow should know it.
+const KYC_ADMIN_API_KEY = process.env.KYC_ADMIN_API_KEY || "";
 const RPC_URL =
   process.env.NEXT_PUBLIC_RPC_URL || "http://localhost:8000/soroban/rpc";
 const PASSPHRASE =
@@ -9,6 +16,13 @@ const PASSPHRASE =
   "Standalone Network ; February 2017";
 const COMPLIANCE_CONTRACT_ID =
   process.env.NEXT_PUBLIC_COMPLIANCE_CONTRACT_ID || "";
+
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
 
 export async function POST(req: NextRequest) {
   if (!ADMIN_SECRET) {
@@ -22,6 +36,17 @@ export async function POST(req: NextRequest) {
       { error: "Compliance contract not configured." },
       { status: 503 },
     );
+  }
+  if (!KYC_ADMIN_API_KEY) {
+    return NextResponse.json(
+      { error: "KYC registration is not configured (KYC_ADMIN_API_KEY unset)." },
+      { status: 503 },
+    );
+  }
+
+  const presented = req.headers.get("x-admin-key") || "";
+  if (!presented || !timingSafeStringEqual(presented, KYC_ADMIN_API_KEY)) {
+    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
   let kycHashHex: string;

@@ -37,7 +37,6 @@ export default function CompliancePage() {
   const [results, setResults] = useState<ReportResult[]>([]);
   const [expandedCommitment, setExpandedCommitment] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [copied, setCopied] = useState<string | null>(null);
   const { toast } = useToast();
   const [, refresh] = useReducer((x: number) => x + 1, 0);
 
@@ -139,12 +138,6 @@ export default function CompliancePage() {
     a.download = `dshield-compliance-${Date.now()}.zip`;
     a.click();
     URL.revokeObjectURL(url);
-  }
-
-  function copyNoteStr(noteStr: string, key: string) {
-    void navigator.clipboard?.writeText(noteStr);
-    setCopied(key);
-    setTimeout(() => setCopied((c) => (c === key ? null : c)), 1500);
   }
 
   function downloadOnePdf(report: ComplianceReport) {
@@ -328,8 +321,6 @@ export default function CompliancePage() {
                       {r.status === "done" && r.report && (
                         <ReportBody
                           report={r.report}
-                          copiedKey={copied}
-                          onCopy={(key) => copyNoteStr(r.report!.note, key)}
                           onDownloadPdf={() => downloadOnePdf(r.report!)}
                           onDownloadTxt={() => downloadOneTxt(r.report!)}
                         />
@@ -370,18 +361,13 @@ function StatusBadge({ status }: { status: ReportStatus }) {
 
 function ReportBody({
   report,
-  copiedKey,
-  onCopy,
   onDownloadPdf,
   onDownloadTxt,
 }: {
   report: ComplianceReport;
-  copiedKey: string | null;
-  onCopy: (key: string) => void;
   onDownloadPdf: () => void;
   onDownloadTxt: () => void;
 }) {
-  const key = report.commitment;
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -423,20 +409,6 @@ function ReportBody({
         )}
       </dl>
 
-      <div className="rounded-xl bg-zinc-800/80 p-3">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs text-zinc-500">Shielded Note (for re-verification)</p>
-          <button
-            type="button"
-            onClick={() => onCopy(key)}
-            className="shrink-0 text-xs font-medium text-brand-400 hover:text-brand-300"
-          >
-            {copiedKey === key ? "Copied!" : "Copy"}
-          </button>
-        </div>
-        <p className="mt-1.5 break-all font-mono text-xs text-zinc-300">{report.note}</p>
-      </div>
-
       <div className="grid grid-cols-2 gap-2">
         <Button variant="primary" onClick={onDownloadPdf}>Download PDF</Button>
         <Button variant="outline" onClick={onDownloadTxt}>Download .txt</Button>
@@ -468,19 +440,34 @@ function ExplorerLink({ url, text, sub, mono }: { url: string | null; text: stri
   );
 }
 
+// Fields like poolId/commitment ultimately trace back to a pasted note
+// string (see NoteImport), so they're not trustworthy enough to interpolate
+// into HTML unescaped before document.write — escape everything.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function reportHtml(r: ComplianceReport): string {
-  const row = (k: string, v: string) => `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`;
-  const txUrl = (h: string) => explorerTxUrl(h);
-  const link = (h: string) => { const u = txUrl(h); return u ? `<a href="${u}">${h}</a>` : h; };
+  const row = (k: string, v: string) => `<tr><td class="k">${escapeHtml(k)}</td><td class="v">${v}</td></tr>`;
+  const link = (h: string) => {
+    const u = explorerTxUrl(h);
+    const safeHash = escapeHtml(h);
+    return u ? `<a href="${escapeHtml(u)}">${safeHash}</a>` : safeHash;
+  };
   const rows = [
-    row("Generated", new Date(r.generatedAt).toISOString()),
-    row("Network", r.network),
+    row("Generated", escapeHtml(new Date(r.generatedAt).toISOString())),
+    row("Network", escapeHtml(r.network)),
     row("Note integrity", r.integrityOk ? "OK — commitment matches" : "MISMATCH"),
     row("Deposit", r.depositConfirmed ? `Confirmed on-chain (leaf #${r.leafIndex})` : "Not found on-chain"),
     row("Status", r.withdrawn ? "Withdrawn (nullifier spent)" : "In pool (unspent)"),
-    row("Commitment", r.commitment),
-    row("Nullifier hash", r.nullifierHash),
-    row("Pool contract", r.poolId),
+    row("Commitment", escapeHtml(r.commitment)),
+    row("Nullifier hash", escapeHtml(r.nullifierHash)),
+    row("Pool contract", escapeHtml(r.poolId)),
     r.depositTx ? row("Deposit tx", link(r.depositTx.hash)) : "",
     r.withdrawTx ? row("Withdraw tx", link(r.withdrawTx.hash)) : "",
   ].join("");
@@ -491,13 +478,10 @@ function reportHtml(r: ComplianceReport): string {
   table{width:100%;border-collapse:collapse;font-size:13px}
   td{padding:8px 0;border-bottom:1px solid #e4e4e7;vertical-align:top}
   td.k{color:#71717a;width:160px}td.v{font-family:ui-monospace,monospace;word-break:break-all}
-  .note{margin-top:24px;padding:12px;background:#f4f4f5;border-radius:8px;font-family:ui-monospace,monospace;font-size:12px;word-break:break-all}
   .label{font-size:11px;color:#71717a;margin-bottom:6px}a{color:#2563eb}
 </style></head><body>
 <h1>DShield Compliance Report</h1>
-<p class="sub">Verifiable from the embedded Note against public on-chain data.</p>
+<p class="sub">Verifiable against public on-chain data.</p>
 <table>${rows}</table>
-<div class="label" style="margin-top:24px">Shielded Note — paste into the Compliance Tool's "Verify" tab to reproduce this report</div>
-<div class="note">${r.note}</div>
 </body></html>`;
 }

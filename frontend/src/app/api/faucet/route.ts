@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as StellarSdk from "@stellar/stellar-sdk";
+import { checkRateLimit, clientKey } from "@/lib/rateLimit";
 
 // Server-only faucet: mints test USDC to a recipient using the issuer secret.
 // The secret lives ONLY in this server route (env var without a NEXT_PUBLIC_
@@ -16,11 +17,24 @@ const USDC_CODE = process.env.NEXT_PUBLIC_USDC_CODE || "USDC";
 // route can't be used to mint absurd amounts.
 const MAX_AMOUNT = BigInt("10000000000000");
 
+// The faucet mints real (if test) tokens on every call; without a limit an
+// automated client could spam it indefinitely.
+const RATE_LIMIT = 5;
+const RATE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
 export async function POST(req: NextRequest) {
   if (!ISSUER_SECRET) {
     return NextResponse.json(
       { error: "Faucet is not configured (USDC_ISSUER_SECRET unset)." },
       { status: 503 },
+    );
+  }
+
+  const rl = checkRateLimit(`faucet:${clientKey(req.headers)}`, RATE_LIMIT, RATE_WINDOW_MS);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Too many faucet requests. Try again later." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSeconds) } },
     );
   }
 
