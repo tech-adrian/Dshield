@@ -154,7 +154,7 @@ ok "Pool deployed: ${POOL_ID:0:12}..."
 COMPLIANCE_ID=$(stellar contract deploy \
   --wasm target/wasm32v1-none/release/dshield_compliance.wasm \
   --source e2e-test --network local \
-  -- --vk_bytes-file-path circuits/compliance/target/vk --admin "$E2E_ADDR")
+  -- --vk_bytes-file-path circuits/compliance/target/vk --admin "$E2E_ADDR" --pools "[\"$POOL_ID\"]")
 ok "Compliance deployed: ${COMPLIANCE_ID:0:12}..."
 
 # ─── Test: get_next_index starts at 0 ───
