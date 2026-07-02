@@ -211,7 +211,7 @@ deploy network="local": build
     # Shared secret required as the x-admin-key header on /api/register-kyc
     # (that route grants "KYC verified" status, so it must not be callable by
     # an arbitrary visitor). Reused across redeploys if already set.
-    KYC_ADMIN_API_KEY=$(grep -m1 '^KYC_ADMIN_API_KEY=' frontend/.env.local 2>/dev/null | cut -d= -f2-)
+    KYC_ADMIN_API_KEY=$(grep -m1 '^KYC_ADMIN_API_KEY=' frontend/.env.local 2>/dev/null | cut -d= -f2- || true)
     [ -n "$KYC_ADMIN_API_KEY" ] || KYC_ADMIN_API_KEY=$(openssl rand -hex 24)
     # Only inject the dev secret key for local deployments (auto-connects a
     # funded wallet). For testnet/production, users connect via Freighter.
