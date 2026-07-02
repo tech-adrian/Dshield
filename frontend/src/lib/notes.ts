@@ -102,17 +102,60 @@ function parseNoteV1(serialized: string): ShieldedNote | null {
 // alone for the copy/paste backup textarea, where readability matters more
 // than length. All bytes here are already URL/fragment-safe (base64url +
 // the "." prefix separator), so no percent-encoding inflation occurs.
+//
+// Deliberately built on plain Uint8Array/DataView/btoa/atob rather than
+// Node's Buffer: this file (and the notes it builds) run in the browser,
+// where `Buffer` only exists via a bundler polyfill that other code in this
+// codebase only ever exercises through `Buffer.from(hex).toString("hex")`.
+// Buffer.alloc/writeUInt32BE/writeBigUInt64BE/copy/equals/base64url are
+// untested surface on that polyfill and threw during render the first time
+// this ran in a real browser — a render-time throw here unmounts the whole
+// page. Uint8Array/DataView/btoa/atob are native browser globals, no
+// polyfill involved.
 const COMPACT_PREFIX = "dS2.";
 const COMPACT_VERSION = 2;
 // version(1) + poolId(32) + leafIndex(4) + amount(8) + commitment(32) +
 // nullifier(32) + secret(32)
 const COMPACT_LENGTH = 1 + 32 + 4 + 8 + 32 + 32 + 32;
-const ZERO_POOL_ID = Buffer.alloc(32);
+const ZERO_POOL_ID = new Uint8Array(32);
 
-function hexToBytes32(hex: string): Buffer | null {
+function hexToBytes32(hex: string): Uint8Array | null {
   const clean = hex.replace(/^0x/, "");
   if (clean.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(clean)) return null;
-  return Buffer.from(clean, "hex");
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
+  return bytes;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlDecode(payload: string): Uint8Array | null {
+  try {
+    const b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -123,7 +166,9 @@ function hexToBytes32(hex: string): Buffer | null {
  * so a future edge case degrades to a longer link instead of breaking.
  */
 function encodeNoteCompact(note: ShieldedNote): string | null {
-  if (note.leafIndex < 0 || note.leafIndex > 0xffffffff) return null;
+  if (!Number.isInteger(note.leafIndex) || note.leafIndex < 0 || note.leafIndex > 0xffffffff) {
+    return null;
+  }
   let amountBig: bigint;
   try {
     amountBig = BigInt(note.amount);
@@ -136,61 +181,65 @@ function encodeNoteCompact(note: ShieldedNote): string | null {
   const secretBytes = hexToBytes32(note.secret);
   if (!commitmentBytes || !nullifierBytes || !secretBytes) return null;
 
-  let poolIdBytes: Buffer;
+  let poolIdBytes: Uint8Array;
   if (note.poolId) {
     try {
-      poolIdBytes = StellarSdk.StrKey.decodeContract(note.poolId);
+      poolIdBytes = new Uint8Array(StellarSdk.StrKey.decodeContract(note.poolId));
     } catch {
       return null;
     }
+    if (poolIdBytes.length !== 32) return null;
   } else {
     poolIdBytes = ZERO_POOL_ID;
   }
 
-  const buf = Buffer.alloc(COMPACT_LENGTH);
+  const bytes = new Uint8Array(COMPACT_LENGTH);
+  const view = new DataView(bytes.buffer);
   let offset = 0;
-  buf.writeUInt8(COMPACT_VERSION, offset);
+  view.setUint8(offset, COMPACT_VERSION);
   offset += 1;
-  poolIdBytes.copy(buf, offset);
+  bytes.set(poolIdBytes, offset);
   offset += 32;
-  buf.writeUInt32BE(note.leafIndex, offset);
+  view.setUint32(offset, note.leafIndex, false);
   offset += 4;
-  buf.writeBigUInt64BE(amountBig, offset);
+  view.setBigUint64(offset, amountBig, false);
   offset += 8;
-  commitmentBytes.copy(buf, offset);
+  bytes.set(commitmentBytes, offset);
   offset += 32;
-  nullifierBytes.copy(buf, offset);
+  bytes.set(nullifierBytes, offset);
   offset += 32;
-  secretBytes.copy(buf, offset);
+  bytes.set(secretBytes, offset);
 
-  return COMPACT_PREFIX + buf.toString("base64url");
+  return COMPACT_PREFIX + base64UrlEncode(bytes);
 }
 
 function decodeNoteCompact(payload: string): ShieldedNote | null {
-  let buf: Buffer;
-  try {
-    buf = Buffer.from(payload, "base64url");
-  } catch {
-    return null;
-  }
-  if (buf.length !== COMPACT_LENGTH || buf.readUInt8(0) !== COMPACT_VERSION) return null;
+  const bytes = base64UrlDecode(payload);
+  if (!bytes || bytes.length !== COMPACT_LENGTH) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint8(0) !== COMPACT_VERSION) return null;
 
   let offset = 1;
-  const poolIdBytes = buf.subarray(offset, offset + 32);
+  const poolIdBytes = bytes.subarray(offset, offset + 32);
   offset += 32;
-  const leafIndex = buf.readUInt32BE(offset);
+  const leafIndex = view.getUint32(offset, false);
   offset += 4;
-  const amount = buf.readBigUInt64BE(offset).toString();
+  const amount = view.getBigUint64(offset, false).toString();
   offset += 8;
-  const commitment = buf.subarray(offset, offset + 32).toString("hex");
+  const commitment = bytesToHex(bytes.subarray(offset, offset + 32));
   offset += 32;
-  const nullifier = buf.subarray(offset, offset + 32).toString("hex");
+  const nullifier = bytesToHex(bytes.subarray(offset, offset + 32));
   offset += 32;
-  const secret = buf.subarray(offset, offset + 32).toString("hex");
+  const secret = bytesToHex(bytes.subarray(offset, offset + 32));
 
-  const poolId = poolIdBytes.equals(ZERO_POOL_ID)
-    ? undefined
-    : StellarSdk.StrKey.encodeContract(Buffer.from(poolIdBytes));
+  let poolId: string | undefined;
+  if (!bytesEqual(poolIdBytes, ZERO_POOL_ID)) {
+    try {
+      poolId = StellarSdk.StrKey.encodeContract(Buffer.from(poolIdBytes));
+    } catch {
+      return null;
+    }
+  }
 
   return {
     nullifier,
