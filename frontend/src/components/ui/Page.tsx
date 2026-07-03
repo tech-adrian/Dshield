@@ -1,5 +1,9 @@
+"use client";
+
 import { cn } from "@/lib/cn";
 import { Card } from "./Card";
+import { Button } from "./Button";
+import { useWallet } from "@/components/WalletProvider";
 
 /**
  * Centered page container. `width` matches the two layouts in the app: the
@@ -50,7 +54,8 @@ export function PageHeader({
 
 /**
  * The "connect your wallet" empty state shown by every gated page. Renders the
- * page title plus a centered prompt card.
+ * page title plus a centered prompt card with the connect action inline, so
+ * the user never has to hunt for the button in the header.
  */
 export function ConnectGate({
   title,
@@ -59,11 +64,20 @@ export function ConnectGate({
   title: string;
   prompt: string;
 }) {
+  const { connect, isConnecting } = useWallet();
   return (
     <PageShell>
       <h1 className="text-2xl font-bold tracking-tight">{title}</h1>
       <Card className="mt-6 p-8 text-center">
         <p className="text-zinc-400">{prompt}</p>
+        <Button
+          size="lg"
+          className="mt-6"
+          onClick={connect}
+          disabled={isConnecting}
+        >
+          {isConnecting ? "Connecting..." : "Connect Wallet"}
+        </Button>
       </Card>
     </PageShell>
   );

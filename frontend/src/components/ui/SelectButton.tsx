@@ -48,6 +48,7 @@ export function SelectButton({
   return (
     <button
       type="button"
+      aria-pressed={!!selected}
       className={cn(selectButton({ selected, tone }), className)}
       {...props}
     />
