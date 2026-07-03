@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useWallet } from "@/components/WalletProvider";
+import { buttonVariants } from "@/components/ui/Button";
 import { getNotes } from "@/lib/notes";
 import { getKyc } from "@/lib/kyc";
 import { formatStroopsOrDash } from "@/lib/format";
@@ -129,7 +131,7 @@ export default function HistoryPage() {
     return (
       <ConnectGate
         title="History"
-        prompt="Connect your wallet to view history."
+        prompt="Connect your wallet to see your shielded activity."
       />
     );
   }
@@ -137,8 +139,8 @@ export default function HistoryPage() {
   return (
     <PageShell>
       <PageHeader
-        title="Activity History"
-        description="All shielded deposits, withdrawals, and compliance actions stored locally on this device."
+        title="History"
+        description="Your deposits, withdrawals, and compliance activity. This record lives only on this device — it's never published anywhere."
       />
 
       {/* Stats */}
@@ -157,7 +159,7 @@ export default function HistoryPage() {
           <p className="text-2xl font-bold text-purple-400">
             {stats.compliance}
           </p>
-          <p className="mt-1 text-xs text-zinc-500">KYC Proofs</p>
+          <p className="mt-1 text-xs text-zinc-500">Compliance</p>
         </Card>
       </div>
 
@@ -174,8 +176,9 @@ export default function HistoryPage() {
           <button
             key={key}
             onClick={() => changeFilter(key)}
+            aria-pressed={filter === key}
             className={cn(
-              "rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
+              "focus-ring rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
               filter === key
                 ? "bg-zinc-800 text-white"
                 : "text-zinc-500 hover:bg-zinc-800/50 hover:text-white",
@@ -192,9 +195,17 @@ export default function HistoryPage() {
           <Card className="p-8 text-center">
             <p className="text-sm text-zinc-500">
               {activity.length === 0
-                ? "No activity yet. Make your first deposit to get started."
-                : "No matching activity."}
+                ? "No activity yet — your shielded history will appear here."
+                : "Nothing matches this filter."}
             </p>
+            {activity.length === 0 && (
+              <Link
+                href="/deposit"
+                className={buttonVariants({ variant: "outline", size: "sm", className: "mt-4" })}
+              >
+                Make your first deposit
+              </Link>
+            )}
           </Card>
         ) : (
           <>

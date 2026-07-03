@@ -12,7 +12,7 @@ import {
 } from "@/lib/report";
 import { explorerTxUrl, explorerContractUrl } from "@/lib/explorer";
 import { truncateMiddle } from "@/lib/format";
-import { PageShell } from "@/components/ui/Page";
+import { PageShell, PageHeader } from "@/components/ui/Page";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -158,6 +158,11 @@ export default function CompliancePage() {
 
   return (
     <PageShell>
+      <PageHeader
+        title="Compliance"
+        description="Create verifiable reports about your shielded funds for auditors or regulators — proving exactly what you choose to, and nothing more. Anyone you share a note with can verify it here too."
+      />
+
       {/* Mode toggle */}
       <div className="mt-8 grid grid-cols-2 gap-2">
         <SelectButton selected={mode === "generate"} onClick={() => switchMode("generate")} disabled={isLoading} className="text-center font-medium">
@@ -192,7 +197,7 @@ export default function CompliancePage() {
             </div>
 
             {allNotes.length === 0 ? (
-              <p className="mt-3 text-sm text-zinc-500">No notes on this device. Deposit first, or import below.</p>
+              <p className="mt-3 text-sm text-zinc-500">No notes on this device yet. Make a deposit, or import a note below.</p>
             ) : (
               <div className="mt-3 space-y-2">
                 {allNotes.map((note) => {
@@ -202,7 +207,8 @@ export default function CompliancePage() {
                       key={note.commitment}
                       onClick={() => toggleNote(note)}
                       disabled={isLoading}
-                      className={`w-full rounded-xl border px-4 py-3 text-left transition-all disabled:pointer-events-none ${
+                      aria-pressed={selected}
+                      className={`focus-ring w-full rounded-xl border px-4 py-3 text-left transition-all disabled:pointer-events-none ${
                         selected
                           ? "border-brand-500/50 bg-brand-950/30"
                           : "border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/40"
@@ -281,37 +287,40 @@ export default function CompliancePage() {
             {results.map((r) => {
               const isExpanded = expandedCommitment === r.note.commitment;
               return (
-                <div key={r.note.commitment} className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/70 backdrop-blur-sm">
+                <div key={r.note.commitment} className="aurora-border overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/70 backdrop-blur-sm">
                   {/* Accordion header */}
-                  <button
-                    onClick={() => setExpandedCommitment(isExpanded ? null : r.note.commitment)}
-                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-zinc-800/40"
-                  >
-                    <span className="flex-1 font-mono text-xs text-zinc-300">
-                      {truncateMiddle(r.note.commitment, 14, 12)}
-                    </span>
+                  <div className="relative z-10 flex items-center transition-colors hover:bg-zinc-800/40">
+                    <button
+                      onClick={() => setExpandedCommitment(isExpanded ? null : r.note.commitment)}
+                      aria-expanded={isExpanded}
+                      className="focus-ring flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left"
+                    >
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-300">
+                        {truncateMiddle(r.note.commitment, 14, 12)}
+                      </span>
 
-                    <StatusBadge status={r.status} />
+                      <StatusBadge status={r.status} />
+
+                      {/* Chevron */}
+                      <svg
+                        className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
+                        fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
 
                     {/* Per-note .txt download */}
                     {r.status === "done" && r.report && (
-                      <span
-                        role="button"
-                        onClick={(e) => { e.stopPropagation(); downloadOneTxt(r.report!); }}
-                        className="rounded-md px-2 py-1 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-zinc-700 hover:text-white"
+                      <button
+                        type="button"
+                        onClick={() => downloadOneTxt(r.report!)}
+                        className="focus-ring mr-3 shrink-0 rounded-md px-2 py-1 text-[10px] font-medium text-zinc-400 transition-colors hover:bg-zinc-700 hover:text-white"
                       >
                         .txt
-                      </span>
+                      </button>
                     )}
-
-                    {/* Chevron */}
-                    <svg
-                      className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
-                      fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
+                  </div>
 
                   {/* Accordion body */}
                   {isExpanded && (
@@ -358,7 +367,7 @@ export default function CompliancePage() {
 
 function StatusBadge({ status }: { status: ReportStatus }) {
   if (status === "loading") return <Badge tone="zinc">Loading…</Badge>;
-  if (status === "done") return <Badge tone="green">Verified</Badge>;
+  if (status === "done") return <Badge tone="green">Complete</Badge>;
   if (status === "error") return <Badge tone="zinc" className="bg-red-950/40 text-red-400">Error</Badge>;
   return <Badge tone="zinc">Pending</Badge>;
 }

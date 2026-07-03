@@ -130,6 +130,17 @@ export function Header() {
             <span className="hidden xs:inline">DShield</span>
           </Link>
 
+          {/* Landing page: live-status pill sits where the nav would be */}
+          {isLanding && (
+            <div className="hidden items-center gap-2.5 rounded-full border border-brand-500/25 bg-brand-500/10 px-3.5 py-1.5 text-xs font-medium text-brand-200 sm:inline-flex">
+              <span className="relative flex h-2 w-2" aria-hidden="true">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-green-400" />
+              </span>
+              Live on Stellar Testnet
+            </div>
+          )}
+
           {/* Desktop nav — hidden on landing page */}
           {!isLanding && (
             <nav className="hidden gap-1 md:flex">
@@ -158,7 +169,9 @@ export function Header() {
                 <div className="relative hidden sm:block" ref={dropdownRef}>
                   <button
                     onClick={() => setBalanceOpen((o) => !o)}
-                    className="rounded-full bg-zinc-800 px-3 py-1.5 font-mono text-xs text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white"
+                    aria-expanded={balanceOpen}
+                    aria-haspopup="true"
+                    className="focus-ring rounded-full bg-zinc-800 px-3 py-1.5 font-mono text-xs text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white"
                   >
                     {truncateMiddle(address, 4, 4)}
                   </button>
@@ -224,7 +237,8 @@ export function Header() {
             {!isLanding && (
               <button
                 onClick={() => setMobileOpen(!mobileOpen)}
-                className="flex items-center justify-center rounded-lg p-2 text-zinc-400 transition-colors hover:text-white md:hidden"
+                aria-expanded={mobileOpen}
+                className="focus-ring flex items-center justify-center rounded-lg p-2 text-zinc-400 transition-colors hover:text-white md:hidden"
                 aria-label="Toggle menu"
               >
                 {mobileOpen ? (

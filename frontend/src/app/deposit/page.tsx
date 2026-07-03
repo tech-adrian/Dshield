@@ -28,6 +28,12 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { SelectButton } from "@/components/ui/SelectButton";
+import {
+  CopyIcon,
+  TelegramIcon,
+  WhatsAppIcon,
+  XIcon,
+} from "@/components/icons";
 import { useToast } from "@/components/ui/Toast";
 import * as StellarSdk from "@stellar/stellar-sdk";
 
@@ -196,25 +202,27 @@ export default function DepositPage() {
 
   if (!address) {
     return (
-      <ConnectGate title="Deposit" prompt="Connect your wallet to deposit." />
+      <ConnectGate
+        title="Deposit"
+        prompt="Connect your wallet to shield USDC and receive a private note."
+      />
     );
   }
 
   return (
     <PageShell>
       <PageHeader
-        title="Deposit into Shielded Pool"
-        description="Your funds are shielded using a cryptographic commitment. The commitment is stored on-chain but reveals nothing about your identity or balance."
+        title="Deposit"
+        description="Move USDC into the shielded pool. You'll receive a private note — the only key to withdrawing your funds later. Nothing on-chain links the deposit to your identity or balance."
       />
 
       <Card className="mt-8">
         <div className="mb-6">
           <h3 className="text-sm font-medium text-zinc-400">How it works</h3>
           <ol className="mt-3 space-y-2 text-sm text-zinc-500">
-            <li>1. Choose a denomination (all deposits in a tier are identical)</li>
-            <li>2. A Poseidon2 commitment is computed from random values</li>
-            <li>3. Your {TOKEN_SYMBOL} is transferred to the shielded pool</li>
-            <li>4. Your note is saved locally for future withdrawal</li>
+            <li>1. Choose an amount — deposits use fixed sizes so they blend in with everyone else&apos;s</li>
+            <li>2. Your {TOKEN_SYMBOL} moves into the shielded pool in one signed transaction</li>
+            <li>3. You receive a private note, saved on this device — back it up right away</li>
           </ol>
         </div>
 
@@ -304,7 +312,7 @@ export default function DepositPage() {
         </Button>
 
         {sessionNotes.length > 0 && (
-          <div className="mt-4 space-y-3">
+          <div className="animate-fade-up mt-4 space-y-3">
             <div className="rounded-xl border border-yellow-600/40 bg-yellow-950/20 p-3">
               <p className="text-xs font-semibold text-yellow-300">
                 Back up your shielded note
@@ -391,19 +399,23 @@ export default function DepositPage() {
                           onClick={() =>
                             copyText(shareLink, `link:${note.commitment}`)
                           }
-                          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-400 hover:text-white"
+                          title={
+                            copiedKey === `link:${note.commitment}`
+                              ? "Copied!"
+                              : "Copy link"
+                          }
+                          className="rounded-lg border border-zinc-600 p-2 text-zinc-300 hover:border-zinc-400 hover:text-white"
                         >
-                          {copiedKey === `link:${note.commitment}`
-                            ? "Copied!"
-                            : "Copy link"}
+                          <CopyIcon className="h-4 w-4" />
                         </button>
                         <a
                           href={tgUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-400 hover:text-white"
+                          title="Telegram"
+                          className="rounded-lg border border-zinc-600 p-2 text-zinc-300 hover:border-zinc-400 hover:text-white"
                         >
-                          Telegram
+                          <TelegramIcon className="h-4 w-4" />
                         </a>
                         <a
                           href={
@@ -415,17 +427,19 @@ export default function DepositPage() {
                           }
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-400 hover:text-white"
+                          title="WhatsApp"
+                          className="rounded-lg border border-zinc-600 p-2 text-zinc-300 hover:border-zinc-400 hover:text-white"
                         >
-                          WhatsApp
+                          <WhatsAppIcon className="h-4 w-4" />
                         </a>
                         <a
                           href={`https://x.com/intent/tweet?text=${xText}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="rounded-lg border border-zinc-600 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-400 hover:text-white"
+                          title="X (public)"
+                          className="rounded-lg border border-zinc-600 p-2 text-zinc-300 hover:border-zinc-400 hover:text-white"
                         >
-                          X (public)
+                          <XIcon className="h-4 w-4" />
                         </a>
                       </div>
                     </div>

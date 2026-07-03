@@ -63,7 +63,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           <div
             key={t.id}
             className={cn(
-              "flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm shadow-xl backdrop-blur-sm",
+              "flex animate-[fade-up_0.3s_cubic-bezier(0.16,1,0.3,1)_both] items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm shadow-xl backdrop-blur-sm",
               t.tone === "error" && "border-red-500/40 bg-red-950/90 text-red-200",
               t.tone === "success" &&
                 "border-green-500/40 bg-green-950/85 text-green-200",
@@ -75,7 +75,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               type="button"
               onClick={() => dismiss(t.id)}
               aria-label="Dismiss"
-              className="mt-0.5 shrink-0 opacity-50 hover:opacity-100"
+              className="focus-ring mt-0.5 shrink-0 rounded opacity-50 transition-opacity hover:opacity-100"
             >
               ✕
             </button>
