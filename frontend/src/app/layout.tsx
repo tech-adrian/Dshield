@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { WalletProvider } from "@/components/WalletProvider";
 import { Background } from "@/components/Background";
+import { ShieldField } from "@/components/ShieldField";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { ToastProvider } from "@/components/ui/Toast";
@@ -19,7 +20,10 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://dshield.vercel.app"),
-  title: "DShield - Shielded Stablecoin Wallet",
+  title: {
+    default: "DShield — Shielded Stablecoin Wallet",
+    template: "%s · DShield",
+  },
   description:
     "Private by Default. Compliant by Choice. A shielded USDC wallet on Stellar using Zero-Knowledge Proofs.",
   icons: {
@@ -55,6 +59,11 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col bg-zinc-950 text-white">
         <Background />
+        {/* Live constellation, present on every page — fixed to the viewport
+            (not the document) so it never scrolls away on tall pages, and
+            vignetted so it reads as ambient texture behind forms and cards
+            rather than competing with them. */}
+        <ShieldField className="pointer-events-none fixed inset-0 -z-10 h-full w-full opacity-70 [mask-image:radial-gradient(52rem_34rem_at_50%_0%,black,transparent_72%)]" />
         <WalletProvider>
           <ToastProvider>
             <Header />
