@@ -33,9 +33,10 @@ import { proveWithdrawal } from "@/lib/prover";
 import { friendlyError } from "@/lib/errors";
 import { syncSpentNotes } from "@/lib/sync";
 import { truncateMiddle } from "@/lib/format";
+import Link from "next/link";
 import { PageShell, PageHeader, ConnectGate } from "@/components/ui/Page";
 import { Card } from "@/components/ui/Card";
-import { Button } from "@/components/ui/Button";
+import { Button, buttonVariants } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { ProgressSteps } from "@/components/ui/ProgressSteps";
 import { NoteImport } from "@/components/ui/NoteImport";
@@ -53,11 +54,11 @@ type WithdrawStep =
 
 const STEP_LABELS: Record<WithdrawStep, string> = {
   idle: "",
-  checking_nullifier: "Checking nullifier…",
-  building_tree: "Building Merkle tree…",
-  generating_proof: "Generating ZK proof (may take ~1 min)…",
-  signing: "Signing transaction…",
-  submitting: "Submitting transaction…",
+  checking_nullifier: "Checking note status…",
+  building_tree: "Syncing with the pool…",
+  generating_proof: "Generating your private proof — this can take about a minute…",
+  signing: "Waiting for your signature…",
+  submitting: "Sending to the network…",
   done: "Done!",
 };
 
@@ -155,13 +156,13 @@ export default function WithdrawPage() {
       await syncDepositsFromChain(poolId);
       commitments = getAllCommitments(note.poolId || POOL_CONTRACT_ID);
       if (commitments.length === 0) {
-        throw new Error("Couldn't load deposit history. Try clearing the cache.");
+        throw new Error("Couldn't load the pool's deposit history. Use “Re-sync from network” below and try again.");
       }
     }
 
     const merkle = await buildMerkleTree(commitments, note.leafIndex);
     if (merkle.root.toLowerCase() !== onChainRoot.toLowerCase()) {
-      throw new Error("Merkle root mismatch. Try 'Clear cache & re-sync' then retry.");
+      throw new Error("Your local data is out of sync with the network. Use “Re-sync from network” below and try again.");
     }
 
     if (getUsdcSacId()) {
@@ -272,18 +273,23 @@ export default function WithdrawPage() {
     setIsLoading(true);
     try {
       clearDeposits(poolId);
-      toast("Cache cleared — reloading from chain…");
+      toast("Reloading deposit history from the network…");
       const synced = await syncDepositsFromChain(poolId);
-      toast(`Found ${synced} deposit${synced !== 1 ? "s" : ""}. Try again.`, "success");
+      toast(`Synced ${synced} deposit${synced !== 1 ? "s" : ""} — try your withdrawal again.`, "success");
     } catch (err) {
-      toast(`Couldn't clear cache — ${friendlyError(err)}`, "error");
+      toast(`Couldn't re-sync — ${friendlyError(err)}`, "error");
     } finally {
       setIsLoading(false);
     }
   }
 
   if (!address) {
-    return <ConnectGate title="Withdraw" prompt="Connect your wallet to withdraw." />;
+    return (
+      <ConnectGate
+        title="Withdraw"
+        prompt="Connect your wallet to redeem your shielded notes."
+      />
+    );
   }
 
   const processingNote = batchResults?.find((r) => r.status === "processing")?.note;
@@ -291,8 +297,8 @@ export default function WithdrawPage() {
   return (
     <PageShell>
       <PageHeader
-        title="Withdraw from Shielded Pool"
-        description="Select one or more notes and generate ZK proofs to withdraw privately. Each note is processed in sequence."
+        title="Withdraw"
+        description="Choose the notes you want to redeem. DShield proves you own them without revealing which deposit was yours — nothing links the withdrawal back to you."
       />
 
       <div className="mt-8 space-y-6">
@@ -318,7 +324,20 @@ export default function WithdrawPage() {
           </div>
 
           {activeNotes.length === 0 ? (
-            <p className="mt-3 text-sm text-zinc-500">No active notes. Deposit funds first.</p>
+            <div className="mt-3 py-4 text-center">
+              <p className="text-sm text-zinc-500">
+                You don&apos;t have any notes to withdraw yet.
+              </p>
+              <Link
+                href="/deposit"
+                className={buttonVariants({ variant: "outline", size: "sm", className: "mt-4" })}
+              >
+                Make a deposit
+              </Link>
+              <p className="mt-3 text-xs text-zinc-600">
+                Received a note from someone? Import it below.
+              </p>
+            </div>
           ) : (
             <div className="mt-3 space-y-2">
               {activeNotes.map((note) => {
@@ -329,7 +348,8 @@ export default function WithdrawPage() {
                     key={note.commitment}
                     onClick={() => toggleNote(note)}
                     disabled={isLoading}
-                    className={`w-full rounded-xl border px-4 py-3 text-left transition-all disabled:pointer-events-none ${
+                    aria-pressed={selected}
+                    className={`focus-ring w-full rounded-xl border px-4 py-3 text-left transition-all disabled:pointer-events-none ${
                       selected
                         ? "border-brand-500/50 bg-brand-950/30"
                         : "border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/40"
@@ -434,17 +454,16 @@ export default function WithdrawPage() {
                   : `Generate Proofs & Withdraw ${selectedNotes.length} Notes`}
             </Button>
 
-            <Button
-              fullWidth
-              variant="outline"
-              onClick={handleClearCacheAndResync}
-              disabled={isLoading}
-              className="text-xs text-zinc-400"
-            >
-              Clear deposit cache &amp; re-sync from chain
-            </Button>
-            <p className="text-xs text-zinc-600">
-              Use this if you hit a Merkle root mismatch.
+            <p className="text-center text-xs text-zinc-600">
+              Withdrawal failing because your data is out of sync?{" "}
+              <button
+                type="button"
+                onClick={handleClearCacheAndResync}
+                disabled={isLoading}
+                className="focus-ring rounded font-medium text-zinc-400 underline decoration-zinc-700 underline-offset-2 transition-colors hover:text-white disabled:pointer-events-none disabled:opacity-50"
+              >
+                Re-sync from network
+              </button>
             </p>
           </>
         )}
