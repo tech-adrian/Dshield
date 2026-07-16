@@ -26,3 +26,10 @@ labels: bug
 
 **Additional context**
 <!-- Anything else that might help -->
+
+**Acceptance Criteria**
+<!-- What must be true for this to be considered fixed? -->
+- [ ]
+- [ ] A screenshot or short screen recording is attached to the PR showing the fix working — required before this can be merged.
+
+**Discuss this issue / coordinate work:** join the DShield contributor Telegram group: https://t.me/+SiGHH24No9U2MDJk
