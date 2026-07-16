@@ -424,6 +424,12 @@ Built with the belief that privacy should be a default right, not a premium feat
 
 ---
 
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and PR guidelines. Please review the [Code of Conduct](CODE_OF_CONDUCT.md) before participating, and report security vulnerabilities per [SECURITY.md](SECURITY.md) rather than opening a public issue.
+
+---
+
 ## License
 
 MIT License
